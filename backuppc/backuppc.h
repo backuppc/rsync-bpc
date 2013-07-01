@@ -174,6 +174,13 @@ typedef struct {
     bpc_candidate_match match[BPC_POOL_WRITE_CONCURRENT_MATCH];
     bpc_candidate_file *candidateList;
     /*
+     * When we first build the candidate match list, we remember where the first
+     * zero-length file is (if any), and the next open slot.  If these change
+     * before we insert a new file, we know to try again (since someone probably
+     * won a race to get there first).
+     */
+    int digestExtZeroLen, digestExtOpen;
+    /*
      * Temporary output file if the in-memory buffer is too small
      */
     int fdOpen;

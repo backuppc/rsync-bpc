@@ -44,6 +44,8 @@ int bpc_poolWrite_open(bpc_poolWrite_info *info, int compress, bpc_digest *diges
     info->retValue      = -1;
     info->poolFileSize  = 0;
     info->retryCnt      = 0;
+    info->digestExtOpen = -1;
+    info->digestExtZeroLen = -1;
     for ( i = 0 ; i < BPC_POOL_WRITE_CONCURRENT_MATCH ; i++ ) {
         info->match[i].used = 0;
     }
@@ -315,12 +317,12 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
          * new digest files then we just try to match them.  Otherwise we also
          * try to match any old V3 files.
          */
+        info->digestExtZeroLen = -1;
         while ( 1 ) {
             char poolPath[BPC_MAXPATHLEN];
 
             bpc_digest_append_ext(&info->digest, ext);
             bpc_digest_md52path(poolPath, info->compress, &info->digest);
-            ext++;
             /*
              * For >= V4.x pool, don't attempt to match pool files that
              * are empty, since in >= V4.x we don't rename pool
@@ -332,27 +334,41 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
              * runs, so resetting that bit prevents the deletion.
              */
             if ( stat(poolPath, &st) ) break;
-            if ( S_ISREG(st.st_mode) && st.st_size > 0 ) {
-                bpc_candidate_file *candidateFile;
-                if ( (st.st_mode & S_IXOTH) && bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
-                    if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Couldn't unmark candidate matching file %s (skipped)\n", poolPath);
-                    break;
+            if ( S_ISREG(st.st_mode) ) {
+                if ( st.st_size > 0 ) {
+                    bpc_candidate_file *candidateFile;
+                    if ( (st.st_mode & S_IXOTH) && bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
+                        if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Couldn't unmark candidate matching file %s (skipped)\n", poolPath);
+                        break;
+                    }
+                    candidateFile = malloc(sizeof(bpc_candidate_file));
+                    if ( !candidateFile ) {
+                        info->errorCnt++;
+                        bpc_logErrf("bpc_poolWrite_write: can't allocate bpc_candidate_file\n");
+                        return -1;
+                    }
+                    candidateFile->digest   = info->digest;
+                    candidateFile->fileSize = st.st_size;
+                    candidateFile->v3File   = 0;
+                    strcpy(candidateFile->fileName, poolPath);
+                    candidateFile->next = info->candidateList;
+                    info->candidateList = candidateFile;
+                    if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Candidate matching file %s\n", candidateFile->fileName);
+                } else if ( info->digestExtZeroLen < 0 ) {
+                    /*
+                     * Remember the first empty file in case we have to insert a
+                     * new pool file here.
+                     */
+                    info->digestExtZeroLen = ext;
                 }
-                candidateFile = malloc(sizeof(bpc_candidate_file));
-                if ( !candidateFile ) {
-                    info->errorCnt++;
-                    bpc_logErrf("bpc_poolWrite_write: can't allocate bpc_candidate_file\n");
-                    return -1;
-                }
-                candidateFile->digest   = info->digest;
-                candidateFile->fileSize = st.st_size;
-                candidateFile->v3File   = 0;
-                strcpy(candidateFile->fileName, poolPath);
-                candidateFile->next = info->candidateList;
-                info->candidateList = candidateFile;
-                if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Candidate matching file %s\n", candidateFile->fileName);
             }
+            ext++;
         }
+        /*
+         * Remember the next open slot in case we have to add a new pool
+         * file here.
+         */
+        info->digestExtOpen = ext;
         bpc_digest_append_ext(&info->digest, 0);
 
         if ( BPC_PoolV3Enabled && !info->candidateList ) {
@@ -376,7 +392,8 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                  *    race conditions of linking vs removing.
                  */
                 if ( stat(poolPath, &st) ) break;
-                if ( S_ISREG(st.st_mode) && st.st_nlink < (unsigned)BPC_HardLinkMax ) {
+                if ( S_ISREG(st.st_mode)
+                        && 1 < st.st_nlink && st.st_nlink < (unsigned)BPC_HardLinkMax ) {
                     bpc_candidate_file *candidateFile = malloc(sizeof(bpc_candidate_file));
                     if ( !candidateFile ) {
                         info->errorCnt++;
@@ -626,45 +643,6 @@ void bpc_poolWrite_repeatPoolWrite(bpc_poolWrite_info *info, char *fileNameTmp)
     info->state  = 2;
     info->fdOpen = 1;
     bpc_poolWrite_write(info, NULL, 0);
-
-#if 0
-    int retryCnt = info->retryCnt;
-    int errorCnt = info->errorCnt;
-    OFF_T nread;
-    bpc_fileZIO_fd fd;
-    char fileName[BPC_MAXPATHLEN];
-    bpc_poolWrite_info infoNew;
-
-    snprintf(fileName, sizeof(fileName), "%s", fileNameTmp);
-
-    if ( retryCnt++ > 5 ) {
-        bpc_logErrf("bpc_poolWrite_repeatPoolWrite: giving up on %s after %d attempts\n", fileName, retryCnt);
-        info->errorCnt++;
-        unlink(fileName);
-        return;
-    }
-
-    if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_poolWrite_repeatPoolWrite: rewriting %s\n", fileName);
-
-    bpc_poolWrite_cleanup(info);
-
-    if ( bpc_fileZIO_open(&fd, fileName, 0, info->compress) < 0 ) {
-        bpc_logErrf("bpc_poolWrite_repeatPoolWrite: can't open %s for reading\n", fileName);
-        info->errorCnt++;
-        return;
-    }
-    bpc_poolWrite_open(&infoNew, info->compress, NULL);
-    infoNew.retryCnt = retryCnt;
-    while ( (nread = bpc_fileZIO_read(&fd, TempBuf, sizeof(TempBuf))) > 0 ) {
-        bpc_poolWrite_write(&infoNew, TempBuf, nread);
-    }
-    bpc_fileZIO_close(&fd);
-
-    bpc_poolWrite_close(&infoNew, &info->retValue, &info->digest, &info->poolFileSize, &info->errorCnt);
-    info->errorCnt    += errorCnt;
-    info->retryCnt     = infoNew.retryCnt;
-    unlink(fileName);
-#endif
 }
 
 int bpc_poolWrite_copyToPool(bpc_poolWrite_info *info, char *poolPath, char *fileName)
@@ -711,57 +689,70 @@ int bpc_poolWrite_copyToPool(bpc_poolWrite_info *info, char *poolPath, char *fil
 
 void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3PoolFile)
 {
-    uint32 ext = 0;
     STRUCT_STAT st;
     char poolPath[BPC_MAXPATHLEN];
+    int redo = 0;
 
     if ( bpc_poolWrite_createPoolDir(info, &info->digest) ) return;
 
-    while ( 1 ) {
-        /*
-         * Find an available file, either adding a new file at the end
-         * of the sequence or replacing a file that has length 0.
-         */
-        int gotPoolFile, linkOk, statOk;
-        ino_t fileIno, poolIno;
-
-        bpc_digest_append_ext(&info->digest, ext);
+    /*
+     * If originally present, make sure the zero-length file is still there (and still
+     * zero-length), and the open slot is still open.  If not, it probably means someone
+     * beat us to it, and we should re-do the whole pool matching to see if the newly
+     * added pool file now matches.
+     */
+    if ( info->digestExtZeroLen >= 0 ) {
+        bpc_digest_append_ext(&info->digest, info->digestExtZeroLen);
         bpc_digest_md52path(poolPath, info->compress, &info->digest);
-        ext++;
+        if ( stat(poolPath, &st) || st.st_size != 0 ) {
+            redo = 1;
+        }
+    }
+    if ( !redo ) {
+        bpc_digest_append_ext(&info->digest, info->digestExtOpen);
+        bpc_digest_md52path(poolPath, info->compress, &info->digest);
+        if ( !stat(poolPath, &st) ) {
+            redo = 1;
+        }
+    }
 
-        gotPoolFile = !stat(poolPath, &st);
-        if ( gotPoolFile && !v3PoolFile && st.st_size == 0 ) {
-            char lockFile[BPC_MAXPATHLEN];
-            int lockFd;
-            /*
-             * We can replace a zero-length file, but only via locking to
-             * avoid race conditions.  Since the hardlinking code below doesn't
-             * use a lock, we can't remove the file and use a hardlink
-             * because of race conditions - another process might be
-             * inserting with the same digest and grab the slot.
-             *
-             * So we make sure we have exclusive access via a lock file,
-             * then rename the file.  If that fails then we copy the file.
-             */
-            if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_poolWrite_addToPool: replacing empty pool file %s with %s\n", poolPath, fileName);
-            snprintf(lockFile, BPC_MAXPATHLEN, "%s.lock", poolPath);
-            lockFd = bpc_lockRangeFile(lockFile, 0, 1, 1);
-            /*
-             * If we don't have the lock, or the file is no longer zero length, or the rename fails,
-             * then try again.
-             */
-            if ( lockFd < 0 || stat(poolPath, &st) || st.st_size != 0 || rename(fileName, poolPath) ) {
-                if ( BPC_LogLevel >= 5 ) {
-                    bpc_logMsgf("bpc_poolWrite_addToPool: lock/rename failed: need to repeat write (lockFd = %d, size = %lu, errno = %d)\n",
-                                 lockFd, (unsigned long)st.st_size, errno);
-                }
-                if ( lockFd >= 0 ) {
-                    bpc_unlockRangeFile(lockFd);
-                }
-                unlink(lockFile);
-                bpc_poolWrite_repeatPoolWrite(info, fileName);
-                return;
+    /*
+     * Try to insert the new file at the zero-length file slot (if present).
+     */
+    if ( !redo && info->digestExtZeroLen >= 0 ) {
+        char lockFile[BPC_MAXPATHLEN];
+        int lockFd;
+        /*
+         * We can replace a zero-length file, but only via locking to
+         * avoid race conditions.  Since the hardlinking code below doesn't
+         * use a lock, we can't remove the file and use a hardlink
+         * because of race conditions - another process might be
+         * inserting with the same digest and grab the slot.
+         *
+         * So we make sure we have exclusive access via a lock file,
+         * check that the file is still zero-length, and then rename
+         * the file.  If that fails then we redo everything.
+         */
+        bpc_digest_append_ext(&info->digest, info->digestExtZeroLen);
+        bpc_digest_md52path(poolPath, info->compress, &info->digest);
+        if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_poolWrite_addToPool: replacing empty pool file %s with %s\n", poolPath, fileName);
+        snprintf(lockFile, BPC_MAXPATHLEN, "%s.lock", poolPath);
+        lockFd = bpc_lockRangeFile(lockFile, 0, 1, 1);
+        /*
+         * If we don't have the lock, or the file is no longer zero length, or the rename fails,
+         * then try again.
+         */
+        if ( lockFd < 0 || stat(poolPath, &st) || st.st_size != 0 || rename(fileName, poolPath) ) {
+            if ( BPC_LogLevel >= 5 ) {
+                bpc_logMsgf("bpc_poolWrite_addToPool: lock/rename failed: need to repeat write (lockFd = %d, size = %lu, errno = %d)\n",
+                             lockFd, (unsigned long)st.st_size, errno);
             }
+            if ( lockFd >= 0 ) {
+                bpc_unlockRangeFile(lockFd);
+            }
+            unlink(lockFile);
+            redo = 1;
+        } else {
             chmod(poolPath, 0444);
             stat(poolPath, &st);
             info->retValue     = v3PoolFile ? 2 : 0;
@@ -770,14 +761,22 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
             unlink(lockFile);
             return;
         }
-        if ( gotPoolFile ) continue;
+    }
 
+    /*
+     * Now try to link the file to the new empty slot at the end
+     */
+    if ( !redo ) {
+        int linkOk, statOk;
+        ino_t fileIno, poolIno;
         /*
          * Since this is a new slot, there is no need to do locking since
          * the link or open operations below are atomic/exclusive.
          *
          * First try to hardlink to the empty pool file slot
          */
+        bpc_digest_append_ext(&info->digest, info->digestExtOpen);
+        bpc_digest_md52path(poolPath, info->compress, &info->digest);
         if ( stat(fileName, &st) ) {
             info->errorCnt++;
             bpc_logErrf("bpc_poolWrite_addToPool: can't stat %s\n", fileName);
@@ -794,7 +793,7 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
          * make sure the link really worked by checking inode numbers
          * TODO: test these different cases.
          */
-        if ( linkOk && fileIno == poolIno ) {
+        if ( statOk && fileIno == poolIno ) {
             /*
              * remove the original file and return
              */
@@ -804,15 +803,12 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
             info->poolFileSize = st.st_size;
             return;
         }
-        if ( statOk ) {
-            /*
-             * We couldn't add the new file - a new file just got added by
-             * someone else.  We call ourselves again to try to match the
-             * file again.
-             */
-            bpc_poolWrite_repeatPoolWrite(info, fileName);
-            return;
-        } else {
+        /*
+         * Something failed.  If the stat failed, the hardlink failure wasn't due
+         * to another file being added by someone else.  Perhaps the cpool is
+         * split across multiple file systems?
+         */
+        if ( !statOk ) {
             /*
              * The hardlink failed.  This could be due to hitting the hardlink
              * limit, or the fact that fileName and poolPath are on different
@@ -823,6 +819,12 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
             return;
         }
     }
+
+    /*
+     * We need to redo the pool write, since it appears someone else has added
+     * a pool file with the same digest.
+     */
+    bpc_poolWrite_repeatPoolWrite(info, fileName);
 }
 
 /*
