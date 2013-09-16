@@ -73,6 +73,7 @@ install-strip:
 rsync_bpc$(EXEEXT): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
+$(BPCOBJ): backuppc/backuppc.h
 $(OBJS): $(HEADERS)
 $(CHECK_OBJS): $(HEADERS)
 

@@ -34,7 +34,7 @@ static char *hexDigits = "0123456789abcdef";
 
 void bpc_lib_conf_init(char *topDir, int hardLinkMax, int poolV3Enabled, int logLevel)
 {
-    if ( logLevel >= 3 ) bpc_logMsgf("bpc_lib_conf_init: topDir = %s, logLevel = %d\n", topDir, logLevel);
+    if ( logLevel >= 8 ) bpc_logMsgf("bpc_lib_conf_init: topDir = %s, logLevel = %d\n", topDir, logLevel);
 
     snprintf(BPC_TopDir,    sizeof(BPC_TopDir),    "%s",    topDir);
     snprintf(BPC_CPoolDir,  sizeof(BPC_CPoolDir),  "%s/%s", BPC_TopDir, "cpool");

@@ -137,7 +137,7 @@ int bpc_fileZIO_close(bpc_fileZIO_fd *fd);
 int bpc_fileZIO_rewind(bpc_fileZIO_fd *fd);
 
 #define BPC_POOL_WRITE_BUF_SZ             (8 * 1048576)     /* 8 MB - must be at least 1MB so the V3 digest calculation can occur */
-#define BPC_POOL_WRITE_CONCURRENT_MATCH   (4)               /* number of pool files we concurrently match */
+#define BPC_POOL_WRITE_CONCURRENT_MATCH   (16)              /* number of pool files we concurrently match */
 
 typedef struct _bpc_candidate_file {
     bpc_digest digest;
