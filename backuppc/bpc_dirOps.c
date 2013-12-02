@@ -128,7 +128,7 @@ int bpc_path_remove(char *path, int compress)
                 bpc_attrib_dir dir;
 
                 bpc_attrib_dirInit(&dir, compress);
-                if ( bpc_attrib_dirRead(&dir, NULL, filePath) ) {
+                if ( bpc_attrib_dirRead(&dir, NULL, filePath, 0) ) {
                     bpc_logErrf("bpc_path_remove: can't read attrib file %s\n", filePath);
                     errorCnt++;
                 }
@@ -212,7 +212,7 @@ int bpc_path_refCountAll(char *path, int compress)
                 bpc_attrib_dir dir;
 
                 bpc_attrib_dirInit(&dir, compress);
-                if ( bpc_attrib_dirRead(&dir, NULL, filePath) ) {
+                if ( bpc_attrib_dirRead(&dir, NULL, filePath, 0) ) {
                     bpc_logErrf("bpc_path_refCountAll: can't read attrib file %s\n", filePath);
                     errorCnt++;
                 } else {

@@ -281,16 +281,17 @@ void bpc_attrib_fileCopyOpt(bpc_attrib_file *fileDest, bpc_attrib_file *fileSrc,
 {
     if ( fileDest == fileSrc ) return;
 
-    fileDest->type     = fileSrc->type;
-    fileDest->compress = fileSrc->compress;
-    fileDest->mode     = fileSrc->mode;
-    fileDest->isTemp   = fileSrc->isTemp;
-    fileDest->uid      = fileSrc->uid;
-    fileDest->gid      = fileSrc->gid;
-    fileDest->nlinks   = fileSrc->nlinks;
-    fileDest->mtime    = fileSrc->mtime;
-    fileDest->size     = fileSrc->size;
-    fileDest->inode    = fileSrc->inode;
+    fileDest->type      = fileSrc->type;
+    fileDest->compress  = fileSrc->compress;
+    fileDest->mode      = fileSrc->mode;
+    fileDest->isTemp    = fileSrc->isTemp;
+    fileDest->uid       = fileSrc->uid;
+    fileDest->gid       = fileSrc->gid;
+    fileDest->nlinks    = fileSrc->nlinks;
+    fileDest->mtime     = fileSrc->mtime;
+    fileDest->size      = fileSrc->size;
+    fileDest->inode     = fileSrc->inode;
+    fileDest->backupNum = fileSrc->backupNum;
     if ( fileSrc->digest.len > 0 || overwriteEmptyDigest ) {
         fileDest->digest = fileSrc->digest;
     }
@@ -518,8 +519,8 @@ static int64 getVarInt(uchar **bufPP, uchar *bufEnd)
         i += 7;
     }
     /*
-     * we ran out of data... make sure bufP is greater more than bufEnd, since
-     * returning * it to be equal (ie: bufP) will be incorrectly interpreted as
+     * we ran out of data... make sure bufP is greater than bufEnd, since
+     * returning it to be equal (ie: bufP) will be incorrectly interpreted as
      * meaning the integer correctly ended right at the end of the buffer.
      */
     *bufPP = bufEnd + 1;
@@ -543,7 +544,7 @@ static int64 getVarInt_v3(uchar **bufPP, uchar *bufEnd)
         }
     }
     /*
-     * we ran out of data... make sure bufP is greater more than bufEnd, since
+     * we ran out of data... make sure bufP is greater than bufEnd, since
      * returning it to be equal (ie: bufP) will be incorrectly interpreted as
      * meaning the integer correctly ended right at the end of the buffer.
      */
@@ -640,7 +641,7 @@ uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *bufP, uchar *bufEnd
     return bufP;
 }
 
-int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName)
+int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName, int backupNum)
 {
     char attribPath[BPC_MAXPATHLEN];
     bpc_fileZIO_fd fd;
@@ -734,6 +735,7 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName)
 
             file = bpc_attrib_fileGet(dir, fileName, 1);
             bpc_attrib_fileInit(file, fileName, xattrNumEntries);
+            file->backupNum = backupNum;
 
             bufP = bpc_attrib_buf2file(file, bufP, buf + nRead, xattrNumEntries);
             if ( bufP > buf + nRead ) {
@@ -794,14 +796,15 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName)
             file = bpc_attrib_fileGet(dir, fileName, 1);
             bpc_attrib_fileInit(file, fileName, 0);
 
-            file->type  = type;
-            file->mode  = getVarInt_v3(&bufP, buf + nRead);
-            file->uid   = getVarInt_v3(&bufP, buf + nRead);
-            file->gid   = getVarInt_v3(&bufP, buf + nRead);
-            sizeDiv4GB  = getVarInt_v3(&bufP, buf + nRead);
-            file->size  = (sizeDiv4GB << 32) + getVarInt_v3(&bufP, buf + nRead);
-            file->mtime = CONV_BUF_TO_UINT32(bufP); bufP += 4;
-            file->compress = dir->compress;
+            file->type      = type;
+            file->mode      = getVarInt_v3(&bufP, buf + nRead);
+            file->uid       = getVarInt_v3(&bufP, buf + nRead);
+            file->gid       = getVarInt_v3(&bufP, buf + nRead);
+            sizeDiv4GB      = getVarInt_v3(&bufP, buf + nRead);
+            file->size      = (sizeDiv4GB << 32) + getVarInt_v3(&bufP, buf + nRead);
+            file->mtime     = CONV_BUF_TO_UINT32(bufP); bufP += 4;
+            file->compress  = dir->compress;
+            file->backupNum = backupNum;
 
             if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirRead(%s): Got v3 file %s: type = %d, mode = 0%o, uid/gid = %d/%d, size = %d\n",
                                                   attribPath, file->name, file->type, file->mode, file->uid, file->gid, file->size);

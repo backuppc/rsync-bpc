@@ -272,6 +272,7 @@ typedef struct {
     time_t mtime;
     OFF_T size;
     ino_t inode;
+    int32 backupNum;
     bpc_digest digest;
     /*
      * hash table of bpc_attrib_xattr entries, indexed by xattr key
@@ -317,7 +318,7 @@ uchar *bpc_attrib_buf2file(bpc_attrib_file *file, uchar *buf, uchar *bufEnd, int
 uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *buf, uchar *bufEnd);
 uchar *bpc_attrib_file2buf(bpc_attrib_file *file, uchar *buf, uchar *bufEnd);
 int bpc_attrib_digestRead(bpc_attrib_dir *dir, bpc_digest *digest, char *attribPath);
-int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName);
+int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName, int backupNum);
 int bpc_attrib_dirWrite(bpc_attrib_dir *dir, char *dirPath, char *attribFileName, bpc_digest *oldDigest);
 
 /*
@@ -407,6 +408,6 @@ int bpc_attribCache_deleteInode(bpc_attribCache_info *ac, ino_t inode);
 int bpc_attribCache_getDirEntryCnt(bpc_attribCache_info *ac, char *path);
 ssize_t bpc_attribCache_getDirEntries(bpc_attribCache_info *ac, char *path, char *entries, ssize_t entrySize);
 void bpc_attribCache_flush(bpc_attribCache_info *ac, int all, char *path);
-void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, char *path, char *dirName);
+void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, char *path, char *dirName, int backupNum);
 
 #endif

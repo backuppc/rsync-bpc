@@ -1,3 +1,24 @@
+NEWS for rsync-bpc-3.0.9.
+
+3.0.9.3 released 1 Dec 2013:
+
+    - Fixed bug in merging of V3 incrementals during restore.  Reported by
+      Denis Jedig and Steve Palm.
+
+3.0.9.2 released 16 Sep 2013:
+
+    - increased BPC_POOL_WRITE_CONCURRENT_MATCH from 4 to 16.
+
+    - increased log threshold in bpc_lib_conf_init from 3 to 8.
+
+3.0.9.1 released 1 Jul 2013:
+
+    - no changes.
+
+3.0.9.0 released 24 June 2013:
+
+    - Initial version based on rsync 3.0.9, plus rsync-patches-3.0.9.tar.gz (23-Sep-2011 10:46).
+
 NEWS for rsync 3.0.9 (23 Sep 2011)
 Protocol: 30 (unchanged)
 Changes since 3.0.8:

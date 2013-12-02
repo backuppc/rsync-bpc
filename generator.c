@@ -762,6 +762,7 @@ int unchanged_file(char *fn, struct file_struct *file, STRUCT_STAT *st)
 	if (always_checksum > 0 && S_ISREG(st->st_mode)) {
 		char sum[MAX_DIGEST_LEN];
                 file_checksum(fn, sum, st->st_size);
+            /*
                 {
                     uchar *p = (uchar*)F_SUM(file);
                     fprintf(stderr, "checksum(%s): %s %02x%02x%02x%02x... vs %02x%02x%02x%02x...\n",
@@ -769,6 +770,7 @@ int unchanged_file(char *fn, struct file_struct *file, STRUCT_STAT *st)
                                     p[0], p[1], p[2], p[3],
                                     sum[0] & 0xff, sum[1] & 0xff, sum[2] & 0xff, sum[3] & 0xff);
                 }
+            */
 		if ( memcmp(sum, F_SUM(file), checksum_len) ) return 0;
 	}
 

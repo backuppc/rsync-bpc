@@ -217,7 +217,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
                 continue;
             }
             bpc_attrib_dirInit(&dir, ac->bkupMergeList[i].compress);
-            if ( (status = bpc_attrib_dirRead(&dir, topDir, attribPath)) ) {
+            if ( (status = bpc_attrib_dirRead(&dir, topDir, attribPath, ac->bkupMergeList[i].num)) ) {
                 bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s/%s) returned %d\n", topDir, attribPath, status);
             }
             entrySize = bpc_attrib_getEntries(&dir, NULL, 0);
@@ -238,6 +238,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
                             bpc_attrib_fileInit(fileDest, fileName, 0);
                         }
                         bpc_attrib_fileCopy(fileDest, file);
+                        fileDest->backupNum = ac->bkupMergeList[i].num;
                     }
                 }
             } else {
@@ -254,7 +255,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
         /*
          * non-merge case - read the single attrib file
          */
-        if ( (status = bpc_attrib_dirRead(&attr->dir, ac->backupTopDir, attribPath)) ) {
+        if ( (status = bpc_attrib_dirRead(&attr->dir, ac->backupTopDir, attribPath, ac->backupNum)) ) {
             bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s, %s) returned %d\n", ac->backupTopDir, attribPath, status);
         }
     }
@@ -321,7 +322,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
                 continue;
             }
             bpc_attrib_dirInit(&dir, ac->bkupMergeList[i].compress);
-            if ( (status = bpc_attrib_dirRead(&dir, topDir, attribPath)) ) {
+            if ( (status = bpc_attrib_dirRead(&dir, topDir, attribPath, ac->bkupMergeList[i].num)) ) {
                 bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", topDir, attribPath, status);
             }
             entrySize = bpc_attrib_getEntries(&dir, NULL, 0);
@@ -358,7 +359,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
         /*
          * non-merge case - read the single attrib file
          */
-        if ( (status = bpc_attrib_dirRead(&attr->dir, ac->backupTopDir, attribPath)) ) {
+        if ( (status = bpc_attrib_dirRead(&attr->dir, ac->backupTopDir, attribPath, ac->backupNum)) ) {
             bpc_logErrf("bpc_attrib_dirRead: bpc_attrib_dirRead(%s/%s) returned %d\n", ac->backupTopDir, attribPath, status);
         }
     }
@@ -509,7 +510,7 @@ int bpc_attribCache_getDirEntryCnt(bpc_attribCache_info *ac, char *path)
     size_t pathLen = strlen(path);
 
     /*
-     * Append a fake file name so we actually open the directory's contents, not the directory entry on level up
+     * Append a fake file name so we actually open the directory's contents, not the directory entry one level up
      */
     if ( pathLen >= BPC_MAXPATHLEN - 3 ) return -1;
     strcpy(path + pathLen, "/x");
@@ -553,12 +554,18 @@ ssize_t bpc_attribCache_getDirEntries(bpc_attribCache_info *ac, char *path, char
     ino_t inode = 0;
 
     /*
-     * Append a fake file name so we actually open the directory's contents, not the directory entry on level up
+     * Append a fake file name so we actually open the directory's contents, not the directory entry one level up
      */
     if ( pathLen >= BPC_MAXPATHLEN - 3 ) return -1;
-    strcpy(path + pathLen, "/x");
-    attr = bpc_attribCache_loadPath(ac, fileName, path);
-    path[pathLen] = '\0';
+    if ( pathLen == 1 && path[0] == '.' ) {
+        strcpy(path, "/x");
+        attr = bpc_attribCache_loadPath(ac, fileName, path);
+        strcpy(path, ".");
+    } else {
+        strcpy(path + pathLen, "/x");
+        attr = bpc_attribCache_loadPath(ac, fileName, path);
+        path[pathLen] = '\0';
+    }
     if ( !attr ) return -1;
     attr->lruCnt = ac->cacheLruCnt++;
 
@@ -729,7 +736,7 @@ void bpc_attribCache_flush(bpc_attribCache_info *ac, int all, char *path)
 /*
  * Returns the full mangled path, given a file path.
  */
-void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, char *path, char *dirName)
+void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, char *path, char *dirName, int backupNum)
 {
     char *p;
     int len;
@@ -740,7 +747,11 @@ void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, char *path, ch
         while ( dirName[0] == '/' ) dirName++;
     } while ( p != dirName );
 
-    len = snprintf(path, BPC_MAXPATHLEN, "%s/%s", ac->backupTopDir, ac->shareName);
+    if ( backupNum < 0 || ac->bkupMergeCnt <= 0 ) {
+        backupNum = ac->backupNum;
+    }
+
+    len = snprintf(path, BPC_MAXPATHLEN, "%s/pc/%s/%d/%s", BPC_TopDir, ac->hostName, backupNum, ac->shareName);
     if ( (dirName[0] == '/' && dirName[1] == '\0') || dirName[0] == '\0' || len >= BPC_MAXPATHLEN - 1 ) {
         return;
     }

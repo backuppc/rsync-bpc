@@ -374,7 +374,7 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
             /*
              * must be a V3 file - look in the backup directory
              */
-            bpc_attribCache_getFullMangledPath(&acNew, fullPath, (char*)fileName);
+            bpc_attribCache_getFullMangledPath(&acNew, fullPath, (char*)fileName, file->backupNum);
             if ( bpc_fileZIO_open(&fdz, fullPath, 0, file->compress) ) {
                 bpc_logErrf("bpc_fileOpen: can't open V3 file %s (from %s, %d, %d)\n", fullPath, fd->fileName, file->compress, file->digest.len);
                 Stats.ErrorCnt++;
@@ -573,7 +573,7 @@ static off_t bpc_fileReadAll(bpc_attribCache_info *ac, char *fileName, char *buf
         /*
          * V3 look in the backup directory
          */
-        bpc_attribCache_getFullMangledPath(&acNew, fullPath, (char*)fileName);
+        bpc_attribCache_getFullMangledPath(&acNew, fullPath, (char*)fileName, file->backupNum);
     }
     if ( bpc_fileZIO_open(&fd, fullPath, 0, file->compress) ) {
         bpc_logErrf("bpc_fileReadAll: can't open %s (from %s)\n", fullPath, fileName);
@@ -854,13 +854,11 @@ int bpc_fchmod(int filedes, mode_t mode)
 
 int bpc_unlink(const char *fileName)
 {
-    char path[BPC_MAXPATHLEN];
     bpc_attrib_file *file;
     int deleteInode = 0;
 
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_unlink(%s)\n", fileName);
 
-    bpc_attribCache_getFullMangledPath(&acNew, path, (char*)fileName);
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
         errno = ENOENT;
         return -1;
@@ -1379,8 +1377,8 @@ int bpc_rename(const char *oldName, const char *newName)
     if ( file->type == BPC_FTYPE_DIR ) {
         char path[BPC_MAXPATHLEN], pathOld[BPC_MAXPATHLEN];
 
-        bpc_attribCache_getFullMangledPath(&acNew, path, (char*)newName);
-        bpc_attribCache_getFullMangledPath(&acNew, pathOld, (char*)oldName);
+        bpc_attribCache_getFullMangledPath(&acNew, path, (char*)newName, file->backupNum);
+        bpc_attribCache_getFullMangledPath(&acNew, pathOld, (char*)oldName, file->backupNum);
 
         if ( rename(pathOld, path) ) {
             bpc_logErrf("bpc_rename: directory rename %s -> %s failed\n", pathOld, path);
@@ -1664,7 +1662,7 @@ int bpc_mkdir(const char *dirName, mode_t mode)
 
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_mkdir(%s, 0%o)\n", dirName, mode);
 
-    bpc_attribCache_getFullMangledPath(&acNew, path, (char*)dirName);
+    bpc_attribCache_getFullMangledPath(&acNew, path, (char*)dirName, -1);
     if ( bpc_attribCache_getFile(&acNew, (char*)dirName, 0, 0) ) {
         errno = EEXIST;
         return -1;
@@ -1699,8 +1697,8 @@ int bpc_rmdir(const char *dirName)
 
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_rmdir(%s)\n", dirName);
 
-    bpc_attribCache_getFullMangledPath(&acNew, path, (char*)dirName);
     file = bpc_attribCache_getFile(&acNew, (char*)dirName, 0, 0);
+    bpc_attribCache_getFullMangledPath(&acNew, path, (char*)dirName, file->backupNum);
 
     statOk = !stat(path, &st);
     if ( file && (!statOk || !S_ISDIR(st.st_mode)) ) {
