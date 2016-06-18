@@ -53,19 +53,20 @@ typedef struct {
  *
  * Any structure stored in a hash table should start with a bpc_hashtable_key entry for the key.
  */
+
 typedef struct {
-    void *nodes;
+    void *key;          /* a NULL key means this node is empty or deleted; also used for free list */
+    uint32 keyLen;      /* with a NULL key, a zero value means empty; non-zero means deleted */
+    uint32 keyHash;
+} bpc_hashtable_key;
+
+typedef struct {
+    bpc_hashtable_key **nodes;
     uint32 nodeSize;
     uint32 size;
     uint32 entries;     /* total number of user entries */
     uint32 entriesDel;  /* number of entries flagged as deleted */
 } bpc_hashtable;
-
-typedef struct {
-    void *key;          /* a NULL key means this node is empty or deleted */
-    uint32 keyLen;      /* with a NULL key, a zero value means empty; non-zero means deleted */
-    uint32 keyHash;
-} bpc_hashtable_key;
 
 void bpc_hashtable_create(bpc_hashtable *tbl, uint32 size, uint32 nodeSize);
 void bpc_hashtable_destroy(bpc_hashtable *tbl);
