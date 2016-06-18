@@ -344,7 +344,7 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
     fd->dirty      = 0;
     fd->fileName   = malloc(strlen(fileName) + 1);
     fd->bufferSize = MAX_BUF_SZ;
-    fd->buffer     = calloc(fd->bufferSize, sizeof(fd->buffer[0]));
+    fd->buffer     = malloc(fd->bufferSize * sizeof(fd->buffer[0]));
     fd->fileSize   = 0;
     if ( !fd->fileName || !fd->buffer ) {
         bpc_fileDescFree(fd);
