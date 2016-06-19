@@ -1,5 +1,10 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.4 released 18 Jun 2016:
+
+    - changes to backuppc/bpc_hashTable so that resizing doesn't move the entries. The nodes are stored as
+      pointers (rather than flat); a freelist maintains unused nodes.
+
 3.0.9.3 released 1 Dec 2013:
 
     - Fixed bug in merging of V3 incrementals during restore.  Reported by
