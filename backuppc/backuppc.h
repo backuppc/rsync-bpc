@@ -22,7 +22,7 @@
 #define _BACKUPPC_H_
 
 #include <rsync.h>
-#include <zlib.h>
+#include "zlib/zlib.h"
 
 #define BPC_MAXPATHLEN          (2 * MAXPATHLEN)
 

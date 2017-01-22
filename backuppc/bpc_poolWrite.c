@@ -25,7 +25,7 @@ static uint32 PoolWriteCnt = 0;
 /*
  * Buffer used in various places for copying, comparing etc
  */
-#define COMPARE_BUF_SZ     (1 << 19)     /* 0.5 MB */
+#define COMPARE_BUF_SZ     (1 << 20)     /* 1.0 MB */
 static uchar TempBuf[2 * COMPARE_BUF_SZ];
 
 int bpc_poolWrite_open(bpc_poolWrite_info *info, int compress, bpc_digest *digest)
@@ -661,8 +661,8 @@ int bpc_poolWrite_copyToPool(bpc_poolWrite_info *info, char *poolPath, char *fil
         return -1;
     }
 
-    while ( (nRead = read(fdRead, (char*)TempBuf, BPC_POOL_WRITE_BUF_SZ)) > 0 ) {
-        char *p = (char*)TempBuf;
+    while ( (nRead = read(fdRead, info->buffer, sizeof(info->buffer))) > 0 ) {
+        uchar *p = info->buffer;
         int thisWrite;
 
         nWrite  = 0;
