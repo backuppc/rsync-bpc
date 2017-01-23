@@ -97,12 +97,26 @@ int bpc_poolRefIterate(bpc_refCount_info *info, bpc_digest *digest, int32 *count
 void bpc_poolRefCountPrint(bpc_refCount_info *info);
 int bpc_poolRefFileWrite(bpc_refCount_info *info, char *fileName);
 int bpc_poolRefFileRead(bpc_refCount_info *info, char *fileName);
-void bpc_poolRefRequestFsck(char *hostDir, int ext);
+void bpc_poolRefRequestFsck(char *targetDir, int ext);
 
-void bpc_poolRefDeltaFileInit(char *hostDir);
-uint32 bpc_poolRefDeltaFileFlush(void);
-void bpc_poolRefDeltaUpdate(int compress, bpc_digest *digest, int32 count);
-void bpc_poolRefDeltaPrint(void);
+/*
+ * Delta counting
+ */
+typedef struct {
+    bpc_refCount_info refCnt[2];
+    char targetDir[BPC_MAXPATHLEN];
+} bpc_deltaCount_info;
+
+void bpc_poolRefDeltaFileInit(bpc_deltaCount_info *info, char *hostDir);
+void bpc_poolRefDeltaFileDestroy(bpc_deltaCount_info *info);
+uint32 bpc_poolRefDeltaFileFlush(bpc_deltaCount_info *info);
+void bpc_poolRefDeltaUpdate(bpc_deltaCount_info *info, int compress, bpc_digest *digest, int32 count);
+void bpc_poolRefDeltaPrint(bpc_deltaCount_info *info);
+
+void bpc_poolRefDeltaFileInitOld(char *hostDir);
+uint32 bpc_poolRefDeltaFileFlushOld(void);
+void bpc_poolRefDeltaUpdateOld(int compress, bpc_digest *digest, int32 count);
+void bpc_poolRefDeltaPrintOld(void);
 
 /*
  * Compressed file IO.  A compressed file descriptor contains a buffer for compressed data.
@@ -219,9 +233,11 @@ void bpc_lib_conf_init(char *topDir, int hardLinkMax, int poolV3Enabled, int log
 void bpc_lib_setTmpFileUnique(int val);
 int bpc_lib_setLogLevel(int logLevel);
 void bpc_byte2hex(char *outStr, int byte);
+uchar bpc_hexStr2byte(char c1, char c2);
 void bpc_digest_buffer2MD5(bpc_digest *digest, uchar *buffer, size_t bufferLen);
 void bpc_digest_append_ext(bpc_digest *digest, uint32 ext);
 void bpc_digest_digest2str(bpc_digest *digest, char *hexStr);
+void bpc_digest_str2digest(bpc_digest *digest, char *hexStr);
 int bpc_digest_compare(bpc_digest *digest1, bpc_digest *digest2);
 void bpc_digest_md52path(char *path, int compress, bpc_digest *digest);
 void bpc_digest_md52path_v3(char *path, int compress, bpc_digest *digest);
@@ -238,8 +254,8 @@ void bpc_logMsgCBSet(void (*cb)(int errFlag, char *mesg, size_t mesgLen));
  * Directory operations
  */
 int bpc_path_create(char *path);
-int bpc_path_remove(char *path, int compress);
-int bpc_path_refCountAll(char *path, int compress);
+int bpc_path_remove(bpc_deltaCount_info *deltaInfo, char *path, int compress);
+int bpc_path_refCountAll(bpc_deltaCount_info *deltaInfo, char *path, int compress, int incr);
 int bpc_lockRangeFd(int fd, OFF_T offset, OFF_T len, int block);
 int bpc_unlockRangeFd(int fd, OFF_T offset, OFF_T len);
 int bpc_lockRangeFile(char *lockFile, OFF_T offset, OFF_T len, int block);
@@ -312,7 +328,7 @@ char *bpc_attrib_fileType2Text(int type);
 void bpc_attrib_dirInit(bpc_attrib_dir *dir, int compressLevel);
 void bpc_attrib_dirDestroy(bpc_attrib_dir *dir);
 ssize_t bpc_attrib_getEntries(bpc_attrib_dir *dir, char *entries, ssize_t entrySize);
-void bpc_attrib_dirRefCount(bpc_attrib_dir *dir, int incr);
+void bpc_attrib_dirRefCount(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, int incr);
 void bpc_attrib_attribFilePath(char *path, char *dir, char *attribFileName);
 bpc_digest *bpc_attrib_dirDigestGet(bpc_attrib_dir *dir);
 uchar *bpc_attrib_buf2file(bpc_attrib_file *file, uchar *buf, uchar *bufEnd, int xattrNumEntries);
@@ -320,7 +336,8 @@ uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *buf, uchar *bufEnd)
 uchar *bpc_attrib_file2buf(bpc_attrib_file *file, uchar *buf, uchar *bufEnd);
 int bpc_attrib_digestRead(bpc_attrib_dir *dir, bpc_digest *digest, char *attribPath);
 int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName, int backupNum);
-int bpc_attrib_dirWrite(bpc_attrib_dir *dir, char *dirPath, char *attribFileName, bpc_digest *oldDigest);
+int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, char *dirPath, char *attribFileName, bpc_digest *oldDigest);
+void bpc_attrib_backwardCompat(int writeOldStyleAttribFile, int keepOldAttribFiles);
 
 /*
  * Attrib caching
@@ -372,6 +389,11 @@ typedef struct {
      */
     bpc_hashtable inodeHT;
 
+    /*
+     * Delta reference count for any changes as we write/change files or attributes
+     */
+    bpc_deltaCount_info *deltaInfo;
+
     char shareName[BPC_MAXPATHLEN];
     int shareNameLen;
     char shareNameUM[BPC_MAXPATHLEN];
@@ -396,6 +418,7 @@ typedef struct {
 } bpc_attribCache_dir;
 
 void bpc_attribCache_init(bpc_attribCache_info *ac, char *host, int backupNum, char *shareNameUM, int compress);
+void bpc_attribCache_setDeltaInfo(bpc_attribCache_info *ac, bpc_deltaCount_info *deltaInfo);
 void bpc_attribCache_setMergeList(bpc_attribCache_info *ac, bpc_backup_info *bkupList, int bkupCnt);
 void bpc_attribCache_destroy(bpc_attribCache_info *ac);
 int bpc_attribCache_readOnly(bpc_attribCache_info *ac, int readOnly);

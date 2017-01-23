@@ -66,9 +66,21 @@ int bpc_lib_setLogLevel(int logLevel)
  */
 void bpc_byte2hex(char *outStr, int byte)
 {
-
     outStr[0] = hexDigits[(byte >> 4) & 0xf];
     outStr[1] = hexDigits[(byte >> 0) & 0xf];
+}
+
+static uchar bpc_hexChar2nibble(char c)
+{
+    if ( '0' <= c && c <= '9' ) return c - '0';
+    if ( 'A' <= c && c <= 'F' ) return 0xa + (c - 'A');
+    if ( 'a' <= c && c <= 'f' ) return 0xa + (c - 'a');
+    return 0;
+}
+
+uchar bpc_hexStr2byte(char c1, char c2)
+{
+    return (bpc_hexChar2nibble(c1) << 4) | bpc_hexChar2nibble(c2);
 }
 
 void bpc_digest_buffer2MD5(bpc_digest *digest, uchar *buffer, size_t bufferLen)
@@ -112,6 +124,13 @@ void bpc_digest_digest2str(bpc_digest *digest, char *hexStr)
         out += 2;
     }
     *out = '\0';
+}
+
+void bpc_digest_str2digest(bpc_digest *digest, char *hexStr)
+{
+    for ( digest->len = 0 ; hexStr[0] && hexStr[1] && digest->len < BPC_DIGEST_LEN_MAX ; hexStr += 2 ) {
+        digest->digest[digest->len++] = bpc_hexStr2byte(hexStr[0], hexStr[1]);
+    }
 }
 
 void bpc_digest_md52path(char *path, int compress, bpc_digest *digest)

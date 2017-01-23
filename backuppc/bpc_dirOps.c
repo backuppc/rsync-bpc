@@ -73,7 +73,7 @@ int bpc_path_create(char *path)
  *
  * Note that inodes are *not* updated, even in cases where nlinks > 0.
  */
-int bpc_path_remove(char *path, int compress)
+int bpc_path_remove(bpc_deltaCount_info *deltaInfo, char *path, int compress)
 {
     char filePath[BPC_MAXPATHLEN];
     STRUCT_STAT st;
@@ -107,14 +107,14 @@ int bpc_path_remove(char *path, int compress)
             if ( !dirList ) {
                 dirListSize = 4096;
                 if ( !(dirList = malloc(dirListSize)) ) {
-                    bpc_logErrf("bpc_path_refCountAll: can't allocate %u bytes\n", (unsigned)dirListSize);
+                    bpc_logErrf("bpc_path_remove: can't allocate %u bytes\n", (unsigned)dirListSize);
                     return ++errorCnt;
                 }
             }
             if ( dirListLen + strlen(dp->d_name) + 1 >= dirListSize ) {
                 dirListSize = dirListSize * 2 + strlen(dp->d_name);
                 if ( !(dirList = realloc(dirList, dirListSize)) ) {
-                    bpc_logErrf("bpc_path_refCountAll: can't reallocate %u bytes\n", (unsigned)dirListSize);
+                    bpc_logErrf("bpc_path_remove: can't reallocate %u bytes\n", (unsigned)dirListSize);
                     return ++errorCnt;
                 }
             }
@@ -137,7 +137,7 @@ int bpc_path_remove(char *path, int compress)
                     /*
                      * Only reduce the ref counts if we succeeded in removing the attrib file
                      */
-                    bpc_attrib_dirRefCount(&dir, -1);
+                    bpc_attrib_dirRefCount(deltaInfo, &dir, -1);
                 }
                 bpc_attrib_dirDestroy(&dir);
             } else {
@@ -152,7 +152,7 @@ int bpc_path_remove(char *path, int compress)
     if ( dirList ) {
         for ( dirListP = dirList ; dirListP < dirList + dirListLen ; dirListP += strlen(dirListP) + 1 ) {
             snprintf(filePath, sizeof(filePath), "%s/%s", path, dirListP);
-            errorCnt += bpc_path_remove(filePath, compress);
+            errorCnt += bpc_path_remove(deltaInfo, filePath, compress);
         }
         free(dirList);
     }
@@ -164,7 +164,7 @@ int bpc_path_remove(char *path, int compress)
  * Reference count all the files below the directory path, based on the attrib
  * files in and below path.
  */
-int bpc_path_refCountAll(char *path, int compress)
+int bpc_path_refCountAll(bpc_deltaCount_info *deltaInfo, char *path, int compress, int incr)
 {
     char filePath[BPC_MAXPATHLEN];
     STRUCT_STAT st;
@@ -212,12 +212,12 @@ int bpc_path_refCountAll(char *path, int compress)
                 bpc_attrib_dir dir;
 
                 bpc_attrib_dirInit(&dir, compress);
-                if ( bpc_attrib_dirRead(&dir, NULL, filePath, 0) ) {
+                if ( bpc_attrib_dirRead(&dir, path, dp->d_name, 0) ) {
                     bpc_logErrf("bpc_path_refCountAll: can't read attrib file %s\n", filePath);
                     errorCnt++;
                 } else {
                     if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_path_refCountAll: adjusting ref counts from attrib file %s\n", filePath);
-                    bpc_attrib_dirRefCount(&dir, 1);
+                    bpc_attrib_dirRefCount(deltaInfo, &dir, incr);
                     bpc_attrib_dirDestroy(&dir);
                 }
             }
@@ -230,7 +230,7 @@ int bpc_path_refCountAll(char *path, int compress)
     if ( dirList ) {
         for ( dirListP = dirList ; dirListP < dirList + dirListLen ; dirListP += strlen(dirListP) + 1 ) {
             snprintf(filePath, sizeof(filePath), "%s/%s", path, dirListP);
-            errorCnt += bpc_path_refCountAll(filePath, compress);
+            errorCnt += bpc_path_refCountAll(deltaInfo, filePath, compress, incr);
         }
         free(dirList);
     }

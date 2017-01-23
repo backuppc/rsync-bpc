@@ -52,6 +52,24 @@ static char *FileType2Text[] = {
     "deleted",
 };
 
+/*
+ * Ensure by default we use old-style "attrib" files for <= 4.0.0alpha3 compatibility.
+ * Newer versions of BackupPC turn this off to use new attribute file naming.
+ */
+static int WriteOldStyleAttribFile = 1;
+static int KeepOldAttribFiles      = 1;
+
+void bpc_attrib_backwardCompat(int writeOldStyleAttribFile, int keepOldAttribFiles)
+{
+    if ( writeOldStyleAttribFile >= 0 ) WriteOldStyleAttribFile = writeOldStyleAttribFile;
+    if ( keepOldAttribFiles >= 0 )      KeepOldAttribFiles = keepOldAttribFiles;
+    if ( BPC_LogLevel >= 2 ) {
+        bpc_logMsgf("bpc_attrib_backwardCompat: WriteOldStyleAttribFile = %d, KeepOldAttribFiles = %d\n",
+                     WriteOldStyleAttribFile, KeepOldAttribFiles);
+    }
+}
+
+
 #define CONV_BUF_TO_UINT32(buf)    ((buf)[0] << 24 | (buf)[1] << 16 | (buf)[2] << 8 | (buf)[3])
 
 #define CONV_UINT32_TO_BUF(buf, val)   { *(buf)++ = ((val) >> 24) & 0xff;               \
@@ -375,13 +393,18 @@ void bpc_attrib_dirDestroy(bpc_attrib_dir *dir)
     bpc_hashtable_destroy(&dir->filesHT);
 }
 
-static void bpc_attrib_fileRefCount(bpc_attrib_file *file, int *incr)
+typedef struct {
+    bpc_deltaCount_info *deltaInfo;
+    int incr;
+} fileRefCnt_info;
+
+static void bpc_attrib_fileRefCount(bpc_attrib_file *file, fileRefCnt_info *info)
 {
     if ( file->digest.len > 0 ) {
         char hexStr[BPC_DIGEST_LEN_MAX * 2 + 1];
         bpc_digest_digest2str(&file->digest, hexStr);
-        if ( BPC_LogLevel >= 7 ) bpc_logMsgf("bpc_attrib_fileRefCount: file %s digest %s delta %d\n", file->name, hexStr, *incr);
-        bpc_poolRefDeltaUpdate(file->compress, &file->digest, *incr);
+        if ( BPC_LogLevel >= 7 ) bpc_logMsgf("bpc_attrib_fileRefCount: file %s digest %s delta %d\n", file->name, hexStr, info->incr);
+        bpc_poolRefDeltaUpdate(info->deltaInfo, file->compress, &file->digest, info->incr);
     }
 }
 
@@ -389,14 +412,18 @@ static void bpc_attrib_fileRefCount(bpc_attrib_file *file, int *incr)
  * call refDeltaUpdate with incr (typically +/-1) for every entry in the directory,
  * as well as the dir itself.
  */
-void bpc_attrib_dirRefCount(bpc_attrib_dir *dir, int incr)
+void bpc_attrib_dirRefCount(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, int incr)
 {
-    bpc_hashtable_iterate(&dir->filesHT, (void*)bpc_attrib_fileRefCount, &incr);
+    fileRefCnt_info info;
+
+    info.deltaInfo = deltaInfo;
+    info.incr      = incr;
+    bpc_hashtable_iterate(&dir->filesHT, (void*)bpc_attrib_fileRefCount, &info);
     if ( dir->digest.len > 0 ) {
         char hexStr[BPC_DIGEST_LEN_MAX * 2 + 1];
         bpc_digest_digest2str(&dir->digest, hexStr);
         if ( BPC_LogLevel >= 7 ) bpc_logMsgf("bpc_attrib_dirRefCount: attrib digest %s delta = %d\n", hexStr, incr);
-        bpc_poolRefDeltaUpdate(dir->compress, &dir->digest, incr);
+        bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, &dir->digest, incr);
     } else {
         if ( BPC_LogLevel >= 7 ) bpc_logMsgf("bpc_attrib_dirRefCount: no attrib digest -> no delta\n");
     }
@@ -447,39 +474,6 @@ void bpc_attrib_attribFilePath(char *path, char *dir, char *attribFileName)
 bpc_digest *bpc_attrib_dirDigestGet(bpc_attrib_dir *dir)
 {
     return &dir->digest;
-}
-
-int bpc_attrib_digestRead(bpc_attrib_dir *dir, bpc_digest *digest, char *attribPath)
-{
-    bpc_fileZIO_fd fd;
-    size_t nRead, digestLen;
-    uint32 magic;
-    uchar buf[256];
-
-    digest->len = 0;
-    if ( bpc_fileZIO_open(&fd, attribPath, 0, dir->compress) ) {
-        bpc_logErrf("bpc_attrib_digestRead: can't open %s\n", attribPath);
-        return -1;
-    }
-    nRead = bpc_fileZIO_read(&fd, buf, sizeof(buf));
-    bpc_fileZIO_close(&fd);
-    if ( nRead == 0 ) {
-        /*
-         * an empty file is legit - this means an empty directory (ie: zero attrib entries)
-         */
-        return 0;
-    }
-    if ( nRead < 20 ) {
-        bpc_logErrf("bpc_attrib_digestRead: can't read at least 20 bytes from %s\n", attribPath);
-        return -1;
-    }
-    magic = CONV_BUF_TO_UINT32(buf);
-    if ( magic != BPC_ATTRIB_TYPE_DIGEST ) return -1;
-    digestLen = nRead - 4;
-    if ( digestLen > sizeof(digest->digest) ) digestLen = sizeof(digest->digest);
-    memcpy(digest->digest, buf + 4, digestLen);
-    digest->len = digestLen;
-    return 0;
 }
 
 static int read_more_data(bpc_fileZIO_fd *fd, uchar *buf, size_t bufSize, size_t *nRead, uchar **bufPP, char *attribPath)
@@ -641,7 +635,10 @@ uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *bufP, uchar *bufEnd
     return bufP;
 }
 
-int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName, int backupNum)
+/*
+ * Read the attribute file at dirPath/attribFilePath and populate dir
+ */
+int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath, int backupNum)
 {
     char attribPath[BPC_MAXPATHLEN];
     bpc_fileZIO_fd fd;
@@ -649,36 +646,130 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName,
     uint32 magic;
     uchar buf[8 * 65536], *bufP;
     STRUCT_STAT st;
+    char *p, *attribFileName;
 
-    bpc_attrib_attribFilePath(attribPath, dirPath, attribFileName);
+    bpc_attrib_attribFilePath(attribPath, dirPath, attribFilePath);
     dir->digest.len = 0;
 
-    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_dirRead(%s)\n", attribPath);
-
-    if ( stat(attribPath, &st) || !S_ISREG(st.st_mode) ) return 0;
-
-    if ( bpc_fileZIO_open(&fd, attribPath, 0, dir->compress) ) {
-        bpc_logErrf("bpc_attrib_dirRead: can't open %s\n", attribPath);
-        return -1;
+    /*
+     * attribFileName points to the last portion of attribFilePath, or the whole
+     * string if it doesn't contain '/'
+     */
+    if ( (attribFileName = strrchr(attribFilePath, '/')) ) {
+        attribFileName++;
+    } else {
+        attribFileName = attribFilePath;
     }
-    nRead = bpc_fileZIO_read(&fd, buf, sizeof(buf));
-    if ( nRead == 0 ) {
+
+    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_dirRead(%s); dirPath = %s, attribFilePath = %s, attribFileName = %s\n",
+                                         attribPath, dirPath, attribFilePath, attribFileName);
+
+    if ( (p = strchr(attribFileName, '_')) && !stat(attribPath, &st) && S_ISREG(st.st_mode) ) {
         /*
-         * an empty file is legit - this means an empty directory (ie: zero attrib entries).
-         * indicate this with an empty digest and empty hash of entries.
+         * Explicit path name to new-style attrib file, and it exists; extract digest
          */
-        bpc_fileZIO_close(&fd);
-        return 0;
+        if ( !strcmp(p + 1, "0") ) return 0;
+        bpc_digest_str2digest(&dir->digest, p + 1);
+        if ( BPC_LogLevel >= 2 ) {
+            char str[256];
+            bpc_digest_digest2str(&dir->digest, str);
+            bpc_logMsgf("bpc_attrib_dirRead: called with attrib file %s: digest = %s, len = %d\n",
+                                              attribPath, str, dir->digest.len);
+        }
+        /*
+         * Write new type attrib files (since we found a new-style one)
+         */
+	WriteOldStyleAttribFile = 0;
+        magic = BPC_ATTRIB_TYPE_XATTR;
+    } else if ( stat(attribPath, &st) || !S_ISREG(st.st_mode) || strchr(attribFileName, '_') ) {
+        DIR *dirOs;
+        struct dirent *dp;
+        int attribFileNameLen = strlen(attribFileName);
+        char attribDirPath[BPC_MAXPATHLEN];
+        /*
+         * Starting in 0.50, the attrib files are zero length with the digest encoded in
+         * the file name, so there is no file just called "attrib".  Look in the directory
+         * to find it.
+         */
+        strcpy(attribDirPath, attribPath);
+        if ( (p = strrchr(attribDirPath, '/')) ) {
+            *p = '\0';
+        } else {
+            strcpy(attribDirPath, ".");
+        }
+	if ( !(dirOs = opendir(attribDirPath)) ) {
+            /*
+             * This is a benign error - just return as though there is an empty attrib file
+             */
+            if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirRead: can't opendir %s\n", attribDirPath);
+	    return 0;
+	}
+	while ( (dp = readdir(dirOs)) ) {
+	    if ( !strcmp(dp->d_name, ".") || !strcmp(dp->d_name, "..") ) continue;
+	    if ( strncmp(dp->d_name, attribFileName, attribFileNameLen) ) continue;
+            p = dp->d_name + attribFileNameLen;
+            if ( p[0] != '_' ) continue;
+            p++;
+	    if ( !strcmp(p, "0") ) {
+                /*
+                 * An empty attrib file is legit; just return with no entries
+                 */
+		closedir(dirOs);
+		return 0;
+	    }
+            bpc_digest_str2digest(&dir->digest, p);
+            if ( BPC_LogLevel >= 6 ) {
+                char str[256];
+                bpc_digest_digest2str(&dir->digest, str);
+                bpc_logMsgf("bpc_attrib_dirRead: Got attrib file %s: digest = %s, len = %d\n",
+                                                  dp->d_name, str, dir->digest.len);
+            }
+            /*
+             * Write new type attrib files (since we found a new-style one)
+             */
+            WriteOldStyleAttribFile = 0;
+            break;
+	}
+	closedir(dirOs);
+        if ( dir->digest.len == 0 ) return 0;
+        magic = BPC_ATTRIB_TYPE_XATTR;
+    } else {
+        if ( bpc_fileZIO_open(&fd, attribPath, 0, dir->compress) ) {
+            bpc_logErrf("bpc_attrib_dirRead: can't open %s\n", attribPath);
+            return -1;
+        }
+        nRead = bpc_fileZIO_read(&fd, buf, sizeof(buf));
+        if ( nRead == 0 ) {
+            /*
+             * an empty file is legit - this means an empty directory (ie: zero attrib entries).
+             * indicate this with an empty digest and empty hash of entries.
+             */
+            bpc_fileZIO_close(&fd);
+            if ( !strcmp(attribFileName, "attrib") ) {
+                char attribPathTemp[BPC_MAXPATHLEN + 16];
+                
+                strcpy(attribPathTemp, attribPath);
+                strcat(attribPathTemp, "_0");
+                if ( rename(attribPath, attribPathTemp) ) {
+                    bpc_logErrf("bpc_attrib_dirRead: rename of empty attrib file from %s to %s failed\n", attribPath, attribPathTemp);
+                    return -1;
+                }
+            }
+            return 0;
+        }
+        if ( nRead < 4 ) {
+            bpc_logErrf("bpc_attrib_dirRead: can't read at least 4 bytes from %s\n", attribPath);
+            bpc_fileZIO_close(&fd);
+            return -1;
+        }
+        magic = CONV_BUF_TO_UINT32(buf);
     }
-    if ( nRead < 4 ) {
-        bpc_logErrf("bpc_attrib_dirRead: can't read at least 4 bytes from %s\n", attribPath);
-        bpc_fileZIO_close(&fd);
-        return -1;
-    }
-    magic = CONV_BUF_TO_UINT32(buf);
 
     if ( magic == BPC_ATTRIB_TYPE_DIGEST ) {
-        size_t digestLen = nRead - 4;
+        char attribPathNew[BPC_MAXPATHLEN];
+        int fdNum;
+        size_t digestLen = nRead - 4, attribPathLen = strlen(attribPath);
+
         if ( nRead < 20 ) {
             bpc_logErrf("bpc_attrib_dirRead: can't read at least 20 bytes from %s\n", attribPath);
             return -1;
@@ -687,19 +778,48 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFileName,
         if ( digestLen > sizeof(dir->digest.digest) ) digestLen = sizeof(dir->digest.digest);
         memcpy(dir->digest.digest, buf + 4, digestLen);
         dir->digest.len = digestLen;
-        bpc_digest_md52path(attribPath, dir->compress, &dir->digest);
-        if ( bpc_fileZIO_open(&fd, attribPath, 0, dir->compress) ) {
-            bpc_logErrf("bpc_attrib_dirRead: can't open %s\n", attribPath);
-            return -1;
+
+        if ( !KeepOldAttribFiles ) {
+            /*
+             * replace the attrib file with a new-style attrib file where the digest is encoded
+             * in a zero length file name
+             */
+            if ( attribPathLen + dir->digest.len * 2 + 2 >= sizeof(attribPathNew) ) {
+                bpc_logErrf("bpc_attrib_dirRead: new digest path too long (%d, %d, %d)\n",
+                                        attribPathLen, dir->digest.len, sizeof(attribPathNew));
+                return -1;
+            }
+            strcpy(attribPathNew, attribPath);
+            attribPathNew[attribPathLen++] = '_';
+            bpc_digest_digest2str(&dir->digest, attribPathNew + attribPathLen);
+            if ( (fdNum = open(attribPathNew, O_WRONLY | O_CREAT | O_TRUNC, 0660)) < 0 ) {
+                bpc_logErrf("bpc_attrib_dirRead: can't open/create empty attrib file %s\n", attribPathNew);
+                return -1;
+            }
+            close(fdNum);
+            unlink(attribPath);
+            if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirRead: replaced %s with %s\n",
+                                                    attribPath, attribPathNew);
         }
-        nRead = bpc_fileZIO_read(&fd, buf, sizeof(buf));
-        if ( nRead < 4 ) {
-            bpc_logErrf("bpc_attrib_dirRead: can't read at least 4 bytes from %s\n", attribPath);
-            bpc_fileZIO_close(&fd);
-            return -1;
-        }
-        magic = CONV_BUF_TO_UINT32(buf);
     }
+
+    if ( dir->digest.len > 0 ) {
+        /*
+         * Point at the pool file
+         */
+        bpc_digest_md52path(attribPath, dir->compress, &dir->digest);
+    }
+    if ( bpc_fileZIO_open(&fd, attribPath, 0, dir->compress) ) {
+        bpc_logErrf("bpc_attrib_dirRead: can't open %s\n", attribPath);
+        return -1;
+    }
+    nRead = bpc_fileZIO_read(&fd, buf, sizeof(buf));
+    if ( nRead < 4 ) {
+        bpc_logErrf("bpc_attrib_dirRead: can't read at least 4 bytes from %s\n", attribPath);
+        bpc_fileZIO_close(&fd);
+        return -1;
+    }
+    magic = CONV_BUF_TO_UINT32(buf);
     bufP = buf + 4;
 
     if ( magic == BPC_ATTRIB_TYPE_XATTR ) {
@@ -937,7 +1057,11 @@ static void bpc_attrib_fileWrite(bpc_attrib_file *file, write_info *info)
     bpc_logErrf("bpc_attrib_fileWrite: BOTCH: can't fit file into buffer (%ld, %ld)\n", bufP - info->buf, sizeof(info->buf));
 }
 
-int bpc_attrib_dirWrite(bpc_attrib_dir *dir, char *dirPath, char *attribFileName, bpc_digest *oldDigest)
+/*
+ * Pre 0.50 attribute writing.  Writes a small file that contains the file hash of the attrib file
+ */
+static int bpc_attrib_dirWriteOld(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir,
+                                  char *dirPath, char *attribFileName, bpc_digest *oldDigest)
 {
     char attribPath[BPC_MAXPATHLEN], attribPathTemp[BPC_MAXPATHLEN];
     bpc_fileZIO_fd fd;
@@ -971,7 +1095,7 @@ int bpc_attrib_dirWrite(bpc_attrib_dir *dir, char *dirPath, char *attribFileName
             bpc_logErrf("bpc_attrib_dirWrite: rename from %s to %s failed\n", attribPathTemp, attribPath);
             return -1;
         }
-        if ( oldDigest ) bpc_poolRefDeltaUpdate(dir->compress, oldDigest, -1);
+        if ( oldDigest ) bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, oldDigest, -1);
         return 0;
     }
 
@@ -1008,8 +1132,137 @@ int bpc_attrib_dirWrite(bpc_attrib_dir *dir, char *dirPath, char *attribFileName
         bpc_logErrf("bpc_attrib_dirWrite: rename from %s to %s failed\n", attribPathTemp, attribPath);
         return -1;
     }
-    if ( oldDigest ) bpc_poolRefDeltaUpdate(dir->compress, oldDigest, -1);
-    bpc_poolRefDeltaUpdate(dir->compress, &digest, 1);
+    if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x..., deltaInfo = %p\n",
+                digest.digest[0], digest.digest[1], digest.digest[2],
+                oldDigest ? oldDigest->digest[0] : 0x0, oldDigest ? oldDigest->digest[1] : 0x0,
+                deltaInfo);
 
+    if ( oldDigest ) bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, oldDigest, -1);
+    bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, &digest, 1);
+
+    return 0;
+}
+
+int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, char *dirPath, char *attribFileName, bpc_digest *oldDigest)
+{
+    char attribPath[BPC_MAXPATHLEN], attribPathTemp[BPC_MAXPATHLEN];
+    bpc_digest digest;
+    int status;
+    OFF_T poolFileSize;
+    int errorCnt;
+    static write_info info;
+    char *p;
+    int fdNum;
+    size_t attribPathLen;
+
+    if ( WriteOldStyleAttribFile ) return bpc_attrib_dirWriteOld(deltaInfo, dir, dirPath, attribFileName, oldDigest);
+
+    bpc_attrib_attribFilePath(attribPath, dirPath, attribFileName);
+    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_dirWrite(%s)\n", attribPath);
+    snprintf(attribPathTemp, BPC_MAXPATHLEN, "%s.%d", attribPath, getpid());
+    if ( (p = strrchr(attribPathTemp, '/')) ) {
+        *p = '\0';
+        if ( bpc_path_create(attribPathTemp) ) return -1;
+        *p = '/';
+    }
+    attribPathLen = strlen(attribPath);
+
+    if ( bpc_hashtable_entryCount(&dir->filesHT) > 0 ) {
+        /*
+         * Write the attribute file to the pool
+         */
+        info.bufP = info.buf;
+        CONV_UINT32_TO_BUF(info.bufP, BPC_ATTRIB_TYPE_XATTR);
+
+        bpc_poolWrite_open(&info.fd, dir->compress, NULL);
+        bpc_hashtable_iterate(&dir->filesHT, (void*)bpc_attrib_fileWrite, &info);
+        write_file_flush(&info);
+        bpc_poolWrite_close(&info.fd, &status, &digest, &poolFileSize, &errorCnt);
+
+        if ( errorCnt ) return -1;
+
+        /*
+         * Starting in 0.50, the attrib file is always empty (so it takes no extra blocks)
+         * and we simply include the digest in the file name by appending the hex digits.
+         *
+         * An empty attrib file is simply "attrib_0", and a legacy attrib file (pre <0.50)
+         * is "attrib".
+         */
+        if ( attribPathLen + digest.len * 2 + 2 >= sizeof(attribPath) ) {
+            bpc_logErrf("bpc_attrib_dirWrite: path too long (%d, %d, %d)\n", strlen(attribPath), digest.len, sizeof(attribPath));
+            return -1;
+        }
+        attribPath[attribPathLen++] = '_';
+        bpc_digest_digest2str(&digest, attribPath + attribPathLen);
+    } else {
+        digest.len = 0;
+        attribPath[attribPathLen++] = '_';
+        strcpy(attribPath + attribPathLen, "0");
+    }
+    
+    /*
+     * Now create an empty attrib file
+     */
+    if ( (fdNum = open(attribPathTemp, O_WRONLY | O_CREAT | O_TRUNC, 0660)) < 0 ) {
+        bpc_logErrf("bpc_attrib_dirWrite: can't open/create raw %s for writing\n", attribPathTemp);
+        return -1;
+    }
+    close(fdNum);
+    if ( rename(attribPathTemp, attribPath) ) {
+        bpc_logErrf("bpc_attrib_dirWrite: rename from %s to %s failed\n", attribPathTemp, attribPath);
+        return -1;
+    }
+    if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: created new attrib file %s\n", attribPath);
+
+    if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x..., deltaInfo = %p \n",
+                digest.digest[0], digest.digest[1], digest.digest[2],
+                oldDigest ? oldDigest->digest[0] : 0x0, oldDigest ? oldDigest->digest[1] : 0x0,
+                deltaInfo);
+    bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, &digest, 1);
+
+    if ( oldDigest ) {
+        if ( !bpc_digest_compare(&digest, oldDigest) ) {
+            if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: old attrib has same digest; no changes to ref counts\n");
+            return 0;
+        }
+        if ( attribPathLen + oldDigest->len * 2 + 2 >= sizeof(attribPath) ) {
+            bpc_logErrf("bpc_attrib_dirWrite: oldDigest path too long (%d, %d, %d)\n", strlen(attribPath), oldDigest->len, sizeof(attribPath));
+            return -1;
+        }
+        strcpy(attribPathTemp, attribPath);
+        if ( oldDigest->len > 0 ) {
+            bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, oldDigest, -1);
+            bpc_digest_digest2str(oldDigest, attribPathTemp + attribPathLen);
+        } else {
+            strcpy(attribPathTemp + attribPathLen, "0");
+        }
+        if ( !unlink(attribPathTemp) ) {
+            if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: removed old attrib file %s\n", attribPathTemp);
+        } else {
+            DIR *dirOs;
+            struct dirent *dp;
+            char deletePath[BPC_MAXPATHLEN];
+
+            /*
+             * Scan the directory and remove any other attribute files
+             */
+            if ( !(p = strrchr(attribPath, '/')) ) {
+                bpc_logErrf("bpc_attrib_dirWrite: can't find a '/' in %s\n", attribPath);
+                return -1;
+            }
+            *p++ = '\0';
+            if ( !(dirOs = opendir(attribPath)) ) {
+                bpc_logErrf("bpc_attrib_dirWrite: can't opendir %s\n", attribPath);
+                return -1;
+            }
+            while ( (dp = readdir(dirOs)) ) {
+                if ( strncmp(dp->d_name, "attrib", 6) || !strcmp(dp->d_name, p) ) continue;
+                snprintf(deletePath, sizeof(deletePath), "%s/%s", attribPath, dp->d_name);
+                unlink(deletePath);
+                if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: removed other old attrib file %s\n", attribPathTemp);
+            }
+            closedir(dirOs);
+        }
+    }
     return 0;
 }

@@ -988,9 +988,10 @@ int recv_files(int f_in, char *local_name)
 				send_msg_int(MSG_REDO, ndx);
 				file->flags |= FLAG_FILE_SENT;
                                 bpc_sysCall_printfileStatus(fname, "retry");
-			} else if (inc_recurse)
+			} else if (inc_recurse) {
 				send_msg_int(MSG_NO_SEND, ndx);
                                 bpc_sysCall_printfileStatus(fname, "fail");
+                        }
 			break;
 		    }
 		case -1:

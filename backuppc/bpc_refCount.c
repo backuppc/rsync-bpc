@@ -255,7 +255,7 @@ int bpc_poolRefFileWrite(bpc_refCount_info *info, char *fileName)
             out.fd = open(fileName, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         }
         if ( out.fd < 0 ) {
-            bpc_logErrf("bpc_poolRefDeltaFileFlush: can't open/create pool delta file name %s (errno %d)\n", fileName, errno);
+            bpc_logErrf("bpc_poolRefFileWrite: can't open/create pool delta file name %s (errno %d)\n", fileName, errno);
             out.errorCnt++;
             return out.errorCnt;
         }
@@ -274,7 +274,7 @@ int bpc_poolRefFileWrite(bpc_refCount_info *info, char *fileName)
 
     if ( out.bufP > out.buf ) write_file_flush(&out);
     if ( close(out.fd) < 0 ) {
-        bpc_logErrf("bpc_poolRefDeltaFileFlush: pool delta close failed to %s (errno %d)\n", fileName, errno);
+        bpc_logErrf("bpc_poolRefFileWrite: pool delta close failed to %s (errno %d)\n", fileName, errno);
         out.errorCnt++;
     }
     return out.errorCnt;
@@ -351,40 +351,70 @@ int bpc_poolRefFileRead(bpc_refCount_info *info, char *fileName)
     return 0;
 }
 
+/*
+ * Mark this host backup as needing an fsck.  Multiple requests can be supported with
+ * unique numbers.  ext == 0 is used for the overall backup process, and it is removed when
+ * the backup finished.  Various errors can use other extensions.  If any files are
+ * present, an fsck is done either by the next backup, BackupPC_refCountUpdate or
+ * BackupPC_fsck.
+ */
+void bpc_poolRefRequestFsck(char *backupDir, int ext)
+{
+    char fileName[BPC_MAXPATHLEN];
+    int fd;
+
+    snprintf(fileName, sizeof(fileName), "%s/refCnt/needFsck%d", backupDir, ext);
+    if ( (fd = open(fileName, O_CREAT | O_WRONLY, 0660)) < 0 ) {
+        bpc_logErrf("bpc_poolRefRequestFsck: can't open/create fsck request file %s (errno %d)\n", fileName, errno);
+    }
+}
+
 /***********************************************************************
  * Reference count deltas - we maintain two hash tables for uncompressed
  * and compressed deltas.
  ***********************************************************************/
 
-static bpc_refCount_info DigestHT[2];
+/*
+ * Legacy support for <= 4.0.0beta3.
+ */
+static bpc_deltaCount_info DeltaInfoOld;
 
-static char   *HostDir      = NULL;
-static int    OutputFileCnt = 0;
+static int OutputFileCnt = 0;
 
-void bpc_poolRefDeltaFileInit(char *hostDir)
+void bpc_poolRefDeltaFileInit(bpc_deltaCount_info *info, char *hostDir)
 {
-    HostDir = hostDir;
-    bpc_poolRefInit(&DigestHT[0], 256);
-    bpc_poolRefInit(&DigestHT[1], 1 << 20);
-    DigestHT[0].initDone = DigestHT[1].initDone = 1;
+    if ( snprintf(info->targetDir, sizeof(info->targetDir), "%s", hostDir)
+		>= (int)sizeof(info->targetDir) - 1 ) {
+	bpc_logErrf("bpc_poolRefDeltaFileInit: targetDir %s truncated\n", hostDir);
+    }
+    bpc_poolRefInit(&info->refCnt[0], 256);
+    bpc_poolRefInit(&info->refCnt[1], 1 << 20);
+    info->refCnt[0].initDone = info->refCnt[1].initDone = 1;
 }
 
-uint32 bpc_poolRefDeltaFileFlush(void)
+void bpc_poolRefDeltaFileDestroy(bpc_deltaCount_info *info)
+{
+    bpc_poolRefDestroy(&info->refCnt[0]);
+    bpc_poolRefDestroy(&info->refCnt[1]);
+}
+
+uint32 bpc_poolRefDeltaFileFlush(bpc_deltaCount_info *info)
 {
     char tempFileName[BPC_MAXPATHLEN], finalFileName[BPC_MAXPATHLEN];
     int compress;
     int errorCnt = 0;
     int fd;
 
-    if ( !DigestHT[0].initDone ) return 1;
+    if ( !info ) info = &DeltaInfoOld;         /* backward compatability */
+    if ( !info->refCnt[0].initDone ) return 1;
     for ( compress = 0 ; compress < 2 ; compress++ ) {
-        uint entryCnt = bpc_hashtable_entryCount(&DigestHT[compress].ht);
+        uint entryCnt = bpc_hashtable_entryCount(&info->refCnt[compress].ht);
 
         if ( entryCnt == 0 ) continue;
 
         do {
             if ( snprintf(tempFileName, sizeof(tempFileName), "%s/refCnt/tpoolCntDelta_%d_%d_%d_%d",
-                          HostDir, compress, BPC_TmpFileUnique, OutputFileCnt, getpid()) >= (int)sizeof(tempFileName) - 1 ) {
+                          info->targetDir, compress, BPC_TmpFileUnique, OutputFileCnt, getpid()) >= (int)sizeof(tempFileName) - 1 ) {
                 bpc_logErrf("bpc_poolRefDeltaFileFlush: pool delta file name %s truncated\n", tempFileName);
                 errorCnt++;
             }
@@ -394,10 +424,10 @@ uint32 bpc_poolRefDeltaFileFlush(void)
             }
         } while ( fd >= 0 );
 
-        errorCnt += bpc_poolRefFileWrite(&DigestHT[compress], tempFileName);
+        errorCnt += bpc_poolRefFileWrite(&info->refCnt[compress], tempFileName);
 
         if ( snprintf(finalFileName, sizeof(finalFileName), "%s/refCnt/poolCntDelta_%d_%d_%d_%d",
-                      HostDir, compress, BPC_TmpFileUnique >= 0 ? BPC_TmpFileUnique : 0,
+                      info->targetDir, compress, BPC_TmpFileUnique >= 0 ? BPC_TmpFileUnique : 0,
                       OutputFileCnt, getpid()) >= (int)sizeof(finalFileName) - 1 ) {
             bpc_logErrf("bpc_poolRefDeltaFileFlush: pool delta file name %s truncated\n", finalFileName);
             errorCnt++;
@@ -412,48 +442,28 @@ uint32 bpc_poolRefDeltaFileFlush(void)
             errorCnt++;
         }
         if ( !errorCnt ) {
-            bpc_hashtable_erase(&DigestHT[compress].ht);
+            bpc_hashtable_erase(&info->refCnt[compress].ht);
         }
     }
     OutputFileCnt++;
     if ( errorCnt ) {
         /*
-         * Need to fsck this host
+         * Need to fsck this particular backup on this host
          */
-        bpc_poolRefRequestFsck(HostDir, 1);
+        bpc_poolRefRequestFsck(info->targetDir, getpid());
     }
     return errorCnt;
 }
 
-/*
- * Mark this host as needing an fsck.  Multiple requests can be supported with unique
- * numbers.  ext == 0 is used for the overall backup process, and it is removed when
- * the backup finished.  Various errors can use other extensions.  If any files are
- * present, an fsck is done either by the next backup, BackupPC_refCountUpdate or
- * BackupPC_fsck.
- */
-void bpc_poolRefRequestFsck(char *hostDir, int ext)
-{
-    char fileName[BPC_MAXPATHLEN];
-    int fd;
-
-    snprintf(fileName, sizeof(fileName), "%s/refCnt/needFsck%d", hostDir, ext);
-    if ( (fd = open(fileName, O_CREAT | O_WRONLY, 0660)) < 0 ) {
-        bpc_logErrf("bpc_poolRefRequestFsck: can't open/create fsck request file %s (errno %d)\n", fileName, errno);
-    }
-}
-
-/*
- * Increment/decrement the reference count for the given digest
- */
-void bpc_poolRefDeltaUpdate(int compress, bpc_digest *digest, int32 count)
+void bpc_poolRefDeltaUpdate(bpc_deltaCount_info *info, int compress, bpc_digest *digest, int32 count)
 {
     DigestInfo *digestInfo;
 
+    if ( !info ) info = &DeltaInfoOld;         /* backward compatability */
     if ( !digest || digest->len == 0 ) return;
-    if ( !DigestHT[0].initDone ) return;
+    if ( !info->refCnt[0].initDone ) return;
 
-    digestInfo = bpc_hashtable_find(&DigestHT[compress ? 1 : 0].ht, digest->digest, digest->len, 1);
+    digestInfo = bpc_hashtable_find(&info->refCnt[compress ? 1 : 0].ht, digest->digest, digest->len, 1);
     if ( digestInfo->key.key == digest->digest ) {
         /*
          * new entry since the key points to our key - copy info into new node and set key locally
@@ -468,16 +478,43 @@ void bpc_poolRefDeltaUpdate(int compress, bpc_digest *digest, int32 count)
         bpc_digest_digest2str(&digestInfo->digest, hexStr);
         bpc_logMsgf("bpc_poolRefDeltaUpdate(%s, %d), count now %d\n", hexStr, count, digestInfo->count);
     }
-    if ( bpc_hashtable_entryCount(&DigestHT[compress ? 1 : 0].ht) > (1 << 20) ) {
-        bpc_poolRefDeltaFileFlush();
+    if ( bpc_hashtable_entryCount(&info->refCnt[compress ? 1 : 0].ht) > (1 << 20) ) {
+        bpc_poolRefDeltaFileFlush(info);
     }
 }
 
-void bpc_poolRefDeltaPrint(void)
+void bpc_poolRefDeltaPrint(bpc_deltaCount_info *info)
 {
-    if ( !DigestHT[0].initDone ) return;
+    if ( !info ) info = &DeltaInfoOld;         /* backward compatability */
+    if ( !info->refCnt[0].initDone ) return;
     fprintf(stderr, "Uncompressed HT:\n");
-    bpc_hashtable_iterate(&DigestHT[0].ht, (void*)bpc_poolRefPrintEntry, NULL);
+    bpc_hashtable_iterate(&info->refCnt[0].ht, (void*)bpc_poolRefPrintEntry, NULL);
     fprintf(stderr, "Compressed HT:\n");
-    bpc_hashtable_iterate(&DigestHT[1].ht, (void*)bpc_poolRefPrintEntry, NULL);
+    bpc_hashtable_iterate(&info->refCnt[1].ht, (void*)bpc_poolRefPrintEntry, NULL);
+}
+
+/*
+ * Legacy support for <= 4.0.0beta3.
+ */
+void bpc_poolRefDeltaFileInitOld(char *hostDir)
+{
+    bpc_poolRefDeltaFileInit(&DeltaInfoOld, hostDir);
+}
+
+uint32 bpc_poolRefDeltaFileFlushOld(void)
+{
+    return bpc_poolRefDeltaFileFlush(&DeltaInfoOld);
+}
+
+/*
+ * Increment/decrement the reference count for the given digest
+ */
+void bpc_poolRefDeltaUpdateOld(int compress, bpc_digest *digest, int32 count)
+{
+    bpc_poolRefDeltaUpdate(&DeltaInfoOld, compress, digest, count);
+}
+
+void bpc_poolRefDeltaPrintOld(void)
+{
+    bpc_poolRefDeltaPrint(&DeltaInfoOld);
 }

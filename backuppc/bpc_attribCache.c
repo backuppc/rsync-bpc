@@ -30,6 +30,7 @@ void bpc_attribCache_init(bpc_attribCache_info *ac, char *hostName, int backupNu
     ac->bkupMergeList = NULL;
     ac->bkupMergeCnt  = 0;
     ac->currentDir[0] = '\0';
+    ac->deltaInfo     = NULL;
     strncpy(ac->hostName, hostName, BPC_MAXPATHLEN);
     ac->hostName[BPC_MAXPATHLEN - 1] = '\0';
     strncpy(ac->shareNameUM, shareNameUM, BPC_MAXPATHLEN);
@@ -42,6 +43,11 @@ void bpc_attribCache_init(bpc_attribCache_info *ac, char *hostName, int backupNu
 
     bpc_hashtable_create(&ac->attrHT,  BPC_ATTRIBCACHE_DIR_HT_SIZE, sizeof(bpc_attribCache_dir));
     bpc_hashtable_create(&ac->inodeHT, BPC_ATTRIBCACHE_DIR_HT_SIZE, sizeof(bpc_attribCache_dir));
+}
+
+void bpc_attribCache_setDeltaInfo(bpc_attribCache_info *ac, bpc_deltaCount_info *deltaInfo)
+{
+    ac->deltaInfo = deltaInfo;
 }
 
 /*
@@ -129,10 +135,10 @@ static void splitPath(bpc_attribCache_info *ac, char *dir, char *fileName, char 
                             dirOrig, fileName, attribPath, path);
 }
 
-static void inodePath(UNUSED(bpc_attribCache_info *ac), char *indexStr, char *attribPath, ino_t inode)
+static void inodePath(UNUSED(bpc_attribCache_info *ac), char *indexStr, char *attribPath, char *attribFile, ino_t inode)
 {
-    snprintf(attribPath, BPC_MAXPATHLEN, "inode/%02x/attrib%02x",
-                        (unsigned int)(inode >> 17) & 0x7f, (unsigned int)(inode >> 10) & 0x7f);
+    snprintf(attribPath, BPC_MAXPATHLEN, "inode/%02x", (unsigned int)(inode >> 17) & 0x7f);
+    snprintf(attribFile, BPC_MAXPATHLEN, "attrib%02x", (unsigned int)(inode >> 10) & 0x7f);
     do {
         bpc_byte2hex(indexStr, inode & 0xff);
         indexStr += 2;
@@ -210,7 +216,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
                 bpc_attrib_dirInit(&attr->dir, ac->compress);
                 break;
             }
-            if ( !attribFileExists ) {
+            if ( (ac->bkupMergeList[i].version < 4 && !attribFileExists) || !attribDirExists ) {
                 /*
                  * nothing to update here - keep going
                  */
@@ -267,12 +273,12 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
 
 static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, char *indexStr, ino_t inode)
 {
-    char attribPath[BPC_MAXPATHLEN];
+    char attribPath[BPC_MAXPATHLEN], attribDir[BPC_MAXPATHLEN], attribFile[BPC_MAXPATHLEN];
     bpc_attribCache_dir *attr;
     int attribPathLen, status;
 
-    inodePath(ac, indexStr, attribPath, inode);
-    attribPathLen = strlen(attribPath);
+    inodePath(ac, indexStr, attribDir, attribFile, inode);
+    attribPathLen = snprintf(attribPath, sizeof(attribPath), "%s/%s", attribDir, attribFile);
 
     attr = bpc_hashtable_find(&ac->inodeHT, (uchar*)attribPath, attribPathLen, 1);
 
@@ -295,7 +301,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
     attr->lruCnt = ac->cacheLruCnt++;
     if ( ac->bkupMergeCnt > 0 ) {
         int i;
-        char topDir[BPC_MAXPATHLEN], fullAttribPath[BPC_MAXPATHLEN];
+        char inodeDir[BPC_MAXPATHLEN], fullAttribPath[BPC_MAXPATHLEN];
 
         /*
          * Merge multiple attrib files to create the "view" for this backup.
@@ -305,25 +311,27 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
             bpc_attrib_dir dir;
             ssize_t entrySize;
             char *entries, *fileName;
-            int attribFileExists;
+            int attribFileExists, attribDirExists = 1;
             STRUCT_STAT st;
 
-            snprintf(topDir, sizeof(topDir), "%s/pc/%s/%d", BPC_TopDir, ac->hostName, ac->bkupMergeList[i].num);
-            snprintf(fullAttribPath, sizeof(fullAttribPath), "%s/%s", topDir, attribPath);
+            snprintf(inodeDir, sizeof(inodeDir), "%s/pc/%s/%d/%s", BPC_TopDir, ac->hostName, ac->bkupMergeList[i].num, attribDir);
+            snprintf(fullAttribPath, sizeof(fullAttribPath), "%s/%s", inodeDir, attribFile);
 
             attribFileExists = !stat(fullAttribPath, &st) && S_ISREG(st.st_mode);
-
-            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadInode: path = %s, file exists = %d\n", fullAttribPath, attribFileExists);
-
             if ( !attribFileExists ) {
+                attribDirExists = !stat(inodeDir, &st) && S_ISDIR(st.st_mode);
+            }
+            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadInode: path = %s, file exists = %d, dir exists = %d\n", fullAttribPath, attribFileExists, attribDirExists);
+
+            if ( (ac->bkupMergeList[i].version < 4 && !attribFileExists) || !attribDirExists ) {
                 /*
                  * nothing to update here - keep going
                  */
                 continue;
             }
             bpc_attrib_dirInit(&dir, ac->bkupMergeList[i].compress);
-            if ( (status = bpc_attrib_dirRead(&dir, topDir, attribPath, ac->bkupMergeList[i].num)) ) {
-                bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", topDir, attribPath, status);
+            if ( (status = bpc_attrib_dirRead(&dir, inodeDir, attribFile, ac->bkupMergeList[i].num)) ) {
+                bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", inodeDir, attribFile, status);
             }
             entrySize = bpc_attrib_getEntries(&dir, NULL, 0);
             if ( (entries = malloc(entrySize)) && bpc_attrib_getEntries(&dir, entries, entrySize) == entrySize ) {
@@ -346,8 +354,8 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
                     }
                 }
             } else {
-                bpc_logErrf("bpc_attribCache_loadInode(%s/%s): can't malloc %lu bytes for entries\n",
-                                    topDir, attribPath, (unsigned long)entrySize);
+                bpc_logErrf("bpc_attribCache_loadInode(%s): can't malloc %lu bytes for entries\n",
+                                    fullAttribPath, (unsigned long)entrySize);
                 if ( entries ) free(entries);
                 bpc_attrib_dirDestroy(&dir);
                 return NULL;
@@ -359,8 +367,11 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
         /*
          * non-merge case - read the single attrib file
          */
-        if ( (status = bpc_attrib_dirRead(&attr->dir, ac->backupTopDir, attribPath, ac->backupNum)) ) {
-            bpc_logErrf("bpc_attrib_dirRead: bpc_attrib_dirRead(%s/%s) returned %d\n", ac->backupTopDir, attribPath, status);
+        char inodeDir[BPC_MAXPATHLEN];
+        snprintf(inodeDir, sizeof(inodeDir), "%s/%s", ac->backupTopDir, attribDir);
+
+        if ( (status = bpc_attrib_dirRead(&attr->dir, inodeDir, attribFile, ac->backupNum)) ) {
+            bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", inodeDir, attribFile, status);
         }
     }
     if ( bpc_hashtable_entryCount(&ac->inodeHT) > BPC_ATTRIBCACHE_DIR_COUNT_MAX ) {
@@ -620,9 +631,10 @@ static void bpc_attribCache_dirWrite(bpc_attribCache_dir *attr, flush_info *info
     }
     if ( !info->ac->readOnly && attr->dirty ) {
         bpc_digest *oldDigest = bpc_attrib_dirDigestGet(&attr->dir);
-        if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attribCache_dirWrite: writing %s/%s with %d entries\n",
-                                            info->ac->backupTopDir, (char*)attr->key.key, bpc_hashtable_entryCount(&attr->dir.filesHT));
-        if ( (status = bpc_attrib_dirWrite(&attr->dir, info->ac->backupTopDir, attr->key.key, oldDigest)) ) {
+        if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attribCache_dirWrite: writing %s/%s with %d entries (oldDigest = 0x%02x%02x...)\n",
+                                            info->ac->backupTopDir, (char*)attr->key.key, bpc_hashtable_entryCount(&attr->dir.filesHT),
+                                            oldDigest ? oldDigest->digest[0] : 0, oldDigest ? oldDigest->digest[1] : 0);
+        if ( (status = bpc_attrib_dirWrite(info->ac->deltaInfo, &attr->dir, info->ac->backupTopDir, attr->key.key, oldDigest)) ) {
             bpc_logErrf("bpc_attribCache_dirWrite: failed to write attributes for dir %s\n", (char*)attr->key.key);
             info->errorCnt++;
         }
@@ -729,7 +741,7 @@ void bpc_attribCache_flush(bpc_attribCache_info *ac, int all, char *path)
          * Any errors likely mean the deltas are probably out of sync with the
          * file system, so request an fsck.
          */
-        bpc_poolRefRequestFsck(ac->hostDir, 1);
+        bpc_poolRefRequestFsck(ac->backupTopDir, 1);
     }
 }
 

@@ -31,6 +31,9 @@ static bpc_attribCache_info acNew;
 static bpc_attribCache_info acOld;
 static int acOldUsed;
 
+static bpc_deltaCount_info DeltaNew;
+static bpc_deltaCount_info DeltaOld;
+
 static int LogLevel;
 static int DoneInit = 0;
 static int CompressLevel;
@@ -72,17 +75,27 @@ void bpc_sysCall_init(
     bpc_logMsgCBSet(logMsgCB);
     bpc_lib_conf_init(topDir, BPC_HardLinkMax, BPC_PoolV3Enabled, logLevel);
     bpc_attribCache_init(&acNew, hostName, newBkupNum, shareNameUM, newCompress);
+    snprintf(hostDir, sizeof(hostDir), "%s/pc/%s/%d", topDir, hostName, newBkupNum);
+    bpc_poolRefDeltaFileInit(&DeltaNew, hostDir);
+    bpc_attribCache_setDeltaInfo(&acNew, &DeltaNew);
     CompressLevel = newCompress;
     if ( prevBkupNum >= 0 ) {
         bpc_attribCache_init(&acOld, hostName, prevBkupNum, shareNameUM, prevCompress);
+        snprintf(hostDir, sizeof(hostDir), "%s/pc/%s/%d", topDir, hostName, prevBkupNum);
+        bpc_poolRefDeltaFileInit(&DeltaOld, hostDir);
+        bpc_attribCache_setDeltaInfo(&acOld, &DeltaOld);
         acOldUsed = 1;
     } else {
         acOldUsed = 0;
     }
-    snprintf(hostDir, sizeof(hostDir), "%s/pc/%s", topDir, hostName);
-    bpc_poolRefDeltaFileInit(hostDir);
     Stats.InodeCurr = Stats.Inode0 = inode0;
     LogLevel = logLevel;
+    /*
+     * Write new-style attrib files (<= 4.0.0beta3 uses old-style), which are 0-length
+     * files with the digest encoded in the file name (eg: attrib_md5HexDigest). We
+     * can still read the old-style files, but we upgrade them as we go.
+     */
+    bpc_attrib_backwardCompat(0, 0);
     if ( mergeBkupInfo && *mergeBkupInfo ) {
         /*
          * Count number of backups to merge: 1 + number of commas.
@@ -135,8 +148,18 @@ int bpc_sysCall_cleanup(void)
         bpc_attribCache_flush(&acNew, 1, NULL);
         if ( acOldUsed ) bpc_attribCache_flush(&acOld, 1, NULL);
     }
-    if ( LogLevel >= 6 ) bpc_poolRefDeltaPrint();
-    Stats.ErrorCnt += bpc_poolRefDeltaFileFlush();
+    if ( LogLevel >= 6 ) {
+        fprintf(stderr, "RefCnt Deltas for new backup\n");
+        bpc_poolRefDeltaPrint(&DeltaNew);
+        if ( acOldUsed ) {
+            fprintf(stderr, "RefCnt Deltas for prev backup\n");
+            bpc_poolRefDeltaPrint(&DeltaOld);
+        }
+    }
+    Stats.ErrorCnt += bpc_poolRefDeltaFileFlush(&DeltaNew);
+    if ( acOldUsed ) {
+        Stats.ErrorCnt += bpc_poolRefDeltaFileFlush(&DeltaOld);
+    }
     fprintf(stderr, "%s: %llu errors, %llu filesExist, %llu sizeExist, %llu sizeExistComp, %llu filesTotal, %llu sizeTotal, %llu filesNew, %llu sizeNew, %llu sizeNewComp, %llu inode\n",
             am_generator ? "DoneGen" : "Done",
             (unsigned long long)Stats.ErrorCnt,
@@ -149,6 +172,8 @@ int bpc_sysCall_cleanup(void)
             (unsigned long long)Stats.NewFileSize,
             (unsigned long long)Stats.NewFileCompSize,
             (unsigned long long)Stats.InodeCurr);
+    fflush(stdout);
+    fflush(stderr);
     return Stats.ErrorCnt;
 }
 
@@ -512,7 +537,7 @@ static int bpc_fileClose(bpc_attribCache_info *ac, FdInfo *fd, int newType, int 
                  * in that case increase the pool reference count
                  */
                 if ( bpc_attribCache_setFile(&acOld, fd->fileName, file, 1) > 0 ) {
-                    bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+                    bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
                 }
             } else {
                 bpc_attribCache_setFile(&acOld, fd->fileName, file, 0);
@@ -522,7 +547,7 @@ static int bpc_fileClose(bpc_attribCache_info *ac, FdInfo *fd, int newType, int 
              * The current file is new to this backup and will be replaced below, so reduce
              * the ref count of the existing (old) file.
              */
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, -1);
+            bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, -1);
         }
     } else if ( acOldUsed && (!file || !file->isTemp) && !bpc_attribCache_getFile(&acOld, fd->fileName, 0, 0) ) {
         bpc_attrib_file *oldFile = bpc_attribCache_getFile(&acOld, fd->fileName, 1, 0);
@@ -545,7 +570,7 @@ static int bpc_fileClose(bpc_attribCache_info *ac, FdInfo *fd, int newType, int 
     } else {
         file->size = 0;
     }
-    if ( !file->isTemp ) bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+    if ( !file->isTemp ) bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, 1);
     bpc_attribCache_setFile(&acNew, fd->fileName, file, 0);
     fprintf(stderr, "IOdone: %s %s\n", match ? "pool" : "new", fileNameLog ? fileNameLog : fd->fileName);
     bpc_fileDescFree(fd);
@@ -718,7 +743,7 @@ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct
     }
     if ( st.st_mode & S_IXOTH ) {
         /*
-         * pool file is marked for deletion - safely unmark it since we going to use it
+         * pool file is marked for deletion - safely unmark it since we are going to use it
          */
         if ( bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
             bpc_logErrf("bpc_sysCall_checkFileMatch(%s): couldn't unmark pool file %s - rewriting\n",
@@ -833,7 +858,7 @@ int bpc_lchmod(const char *fileName, mode_t mode)
 
     if ( acOldUsed && !file->isTemp && file->inode < Stats.Inode0 && !bpc_attribCache_getFile(&acOld, (char*)fileName, 0, 0) ) {
         if ( bpc_attribCache_setFile(&acOld, (char*)fileName, file, 1) ) {
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+            bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
         }
     }
     file->mode = mode;
@@ -876,7 +901,7 @@ int bpc_unlink(const char *fileName)
             if ( LogLevel >= 6 ) bpc_logMsgf("bpc_unlink: setting inode in old (inode = %lu, nlinks = %lu)\n",
                                              (unsigned long)file->inode, (unsigned long)file->nlinks);
             bpc_attribCache_setInode(&acOld, file->inode, file);
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+            bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
         }
         /*
          * If this file is older than this backup, then move it to old
@@ -896,7 +921,7 @@ int bpc_unlink(const char *fileName)
         file->nlinks--;
         if ( file->nlinks <= 0 ) {
             deleteInode = 1;
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, -1);
+            bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, -1);
         } else {
             if ( LogLevel >= 6 ) bpc_logMsgf("bpc_unlink: updating inode in new (inode = %lu, nlinks = %lu)\n", (unsigned long)file->inode, (unsigned long)file->nlinks);
             bpc_attribCache_setInode(&acNew, file->inode, file);
@@ -916,7 +941,7 @@ int bpc_unlink(const char *fileName)
             }
         } else if ( !file->isTemp ) {
             if ( file->digest.len > 0 ) {
-                bpc_poolRefDeltaUpdate(file->compress, &file->digest, -1);
+                bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, -1);
             }
         }
     }
@@ -1140,7 +1165,7 @@ int bpc_link(const char *targetName, const char *linkName)
          */
         if ( acOldUsed && !bpc_attribCache_getFile(&acOld, (char*)targetName, 0, 0) ) {
             bpc_attribCache_setFile(&acOld, (char*)targetName, file, 0);
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+            bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
         }
         /*
          * promote the target to a hardlink; both files are identical
@@ -1154,7 +1179,7 @@ int bpc_link(const char *targetName, const char *linkName)
          */
         if ( acOldUsed && !bpc_attribCache_getInode(&acOld, file->inode, 0) ) {
             bpc_attribCache_setInode(&acOld, file->inode, file);
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+            bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
         }
         /*
          * reference count is unchanged since the inode already points at the pool file
@@ -1192,7 +1217,7 @@ int bpc_lutimes(const char *fileName, struct timeval *t)
 
     if ( file->inode < Stats.Inode0 && acOldUsed && !file->isTemp && !bpc_attribCache_getFile(&acOld, (char*)fileName, 0, 0) ) {
         if ( bpc_attribCache_setFile(&acOld, (char*)fileName, file, 1) > 0 ) {
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+            bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
         }
     }
     file->mtime = t[1].tv_sec;
@@ -1244,7 +1269,7 @@ int bpc_lutime(const char *fileName, time_t mtime)
 
     if ( file->inode < Stats.Inode0 && acOldUsed && !file->isTemp && !bpc_attribCache_getFile(&acOld, (char*)fileName, 0, 0) ) {
         if ( bpc_attribCache_setFile(&acOld, (char*)fileName, file, 1) > 0 ) {
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+            bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
         }
     }
     file->mtime = mtime;
@@ -1291,7 +1316,7 @@ int bpc_lchown(const char *fileName, uid_t uid, gid_t gid)
 
     if ( file->inode < Stats.Inode0 && acOldUsed && !file->isTemp && !bpc_attribCache_getFile(&acOld, (char*)fileName, 0, 0) ) {
         if ( bpc_attribCache_setFile(&acOld, (char*)fileName, file, 1) > 0 ) {
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+            bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
         }
     }
     file->uid = uid;
@@ -1389,7 +1414,7 @@ int bpc_rename(const char *oldName, const char *newName)
     if ( acOldUsed ) {
         if ( !oldIsTemp && !bpc_attribCache_getFile(&acOld, (char*)oldName, 0, 0) ) {
             if ( bpc_attribCache_setFile(&acOld, (char*)oldName, file, 1) > 0 ) {
-                bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+                bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
             }
         }
         if ( !fileNew && !bpc_attribCache_getFile(&acOld, (char*)newName, 0, 0) ) {
@@ -1399,7 +1424,7 @@ int bpc_rename(const char *oldName, const char *newName)
         }
     }
     if ( !fileNew || fileAttrChanged ) {
-        bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+        bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, 1);
         bpc_attribCache_setFile(&acNew, (char*)newName, file, 0);
     }
     bpc_attribCache_deleteFile(&acNew, (char*)oldName);
@@ -1701,11 +1726,8 @@ int bpc_rmdir(const char *dirName)
     bpc_attribCache_getFullMangledPath(&acNew, path, (char*)dirName, file->backupNum);
 
     statOk = !stat(path, &st);
-    if ( file && (!statOk || !S_ISDIR(st.st_mode)) ) {
-        errno = ENOTDIR;
-        return -1;
-    }
-    if ( !file || (!statOk || !S_ISDIR(st.st_mode)) ) {
+
+    if ( (!file || file->type != BPC_FTYPE_DIR) && (!statOk || !S_ISDIR(st.st_mode)) ) {
         errno = ENOENT;
         return -1;
     }
@@ -1723,7 +1745,7 @@ int bpc_rmdir(const char *dirName)
      * TODO: is dirName in the right charset?
      */
     bpc_attribCache_flush(&acNew, 0, (char*)dirName);
-    bpc_path_remove(path, acNew.compress);
+    if ( statOk ) bpc_path_remove(&DeltaNew, path, acNew.compress);
     if ( file && file->inode < Stats.Inode0 && acOldUsed && !bpc_attribCache_getFile(&acOld, (char*)dirName, 0, 0) ) {
         bpc_attribCache_setFile(&acOld, (char*)dirName, file, 0);
     }
@@ -1861,7 +1883,7 @@ int bpc_lsetxattr(const char *path, const char *name, const void *value, size_t 
      */
     if ( acOldUsed && !file->isTemp && file->inode < Stats.Inode0 && !bpc_attribCache_getFile(&acOld, (char*)path, 0, 0) ) {
         if ( bpc_attribCache_setFile(&acOld, (char*)path, file, 1) > 0 ) {
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+            bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
         }
     }
 
@@ -1898,7 +1920,7 @@ int bpc_lremovexattr(const char *path, const char *name)
      */
     if ( acOldUsed && !file->isTemp && file->inode < Stats.Inode0 && !bpc_attribCache_getFile(&acOld, (char*)path, 0, 0) ) {
         if ( bpc_attribCache_setFile(&acOld, (char*)path, file, 1) > 0 ) {
-            bpc_poolRefDeltaUpdate(file->compress, &file->digest, 1);
+            bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
         }
     }
 
