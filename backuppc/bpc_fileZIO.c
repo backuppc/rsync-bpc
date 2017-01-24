@@ -286,12 +286,15 @@ ssize_t bpc_fileZIO_write(bpc_fileZIO_fd *fd, uchar *buf, size_t nWrite)
             status = deflate(&fd->strm, Z_FINISH);
             numOut = fd->strm.next_out - (Bytef*)fd->buf;
 
+            uchar *subBuf = (uchar*)fd->buf;
+            
             while ( numOut > 0 ) {
                 do {
-                    thisWrite = write(fd->fd, fd->buf, numOut);
+                    thisWrite = write(fd->fd, subBuf, numOut);
                 } while ( thisWrite < 0 && errno == EINTR );
                 if ( thisWrite < 0 ) return thisWrite;
                 numOut -= thisWrite;
+                subBuf += thisWrite;
             }
             if ( status != Z_OK ) break;
         }
@@ -312,12 +315,15 @@ ssize_t bpc_fileZIO_write(bpc_fileZIO_fd *fd, uchar *buf, size_t nWrite)
         deflate(&fd->strm, Z_NO_FLUSH);
         numOut = fd->strm.next_out - (Bytef*)fd->buf;
 
+        uchar *subBuf = (uchar*)fd-buf;
+
         while ( numOut > 0 ) {
             do {
-                thisWrite = write(fd->fd, fd->buf, numOut);
+                thisWrite = write(fd->fd, subBuf, numOut);
             } while ( thisWrite < 0 && errno == EINTR );
             if ( thisWrite < 0 ) return thisWrite;
             numOut -= thisWrite;
+            subBuf += thisWrite;
         }
     }
     return nWrite;
