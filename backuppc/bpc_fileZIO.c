@@ -278,6 +278,7 @@ ssize_t bpc_fileZIO_write(bpc_fileZIO_fd *fd, uchar *buf, size_t nWrite)
         if ( BPC_LogLevel >= 10 ) bpc_logMsgf("Flushing (nWrite = %d)\n", nWrite);
         while ( 1 ) {
             int status, numOut, thisWrite;
+            char *writePtr = fd->buf;
             
             fd->strm.next_in   = NULL;
             fd->strm.avail_in  = 0;
@@ -285,16 +286,14 @@ ssize_t bpc_fileZIO_write(bpc_fileZIO_fd *fd, uchar *buf, size_t nWrite)
             fd->strm.avail_out = fd->bufSize;
             status = deflate(&fd->strm, Z_FINISH);
             numOut = fd->strm.next_out - (Bytef*)fd->buf;
-
-            uchar *subBuf = (uchar*)fd->buf;
             
             while ( numOut > 0 ) {
                 do {
-                    thisWrite = write(fd->fd, subBuf, numOut);
+                    thisWrite = write(fd->fd, writePtr, numOut);
                 } while ( thisWrite < 0 && errno == EINTR );
                 if ( thisWrite < 0 ) return thisWrite;
-                numOut -= thisWrite;
-                subBuf += thisWrite;
+                numOut   -= thisWrite;
+                writePtr += thisWrite;
             }
             if ( status != Z_OK ) break;
         }
@@ -309,21 +308,20 @@ ssize_t bpc_fileZIO_write(bpc_fileZIO_fd *fd, uchar *buf, size_t nWrite)
     fd->strm.avail_in = nWrite;
     while ( fd->strm.avail_in > 0 ) {
         int numOut, thisWrite;
+        char *writePtr = fd->buf;
 
         fd->strm.next_out  = (Bytef*)fd->buf;
         fd->strm.avail_out = fd->bufSize;
         deflate(&fd->strm, Z_NO_FLUSH);
         numOut = fd->strm.next_out - (Bytef*)fd->buf;
 
-        uchar *subBuf = (uchar*)fd-buf;
-
         while ( numOut > 0 ) {
             do {
-                thisWrite = write(fd->fd, subBuf, numOut);
+                thisWrite = write(fd->fd, writePtr, numOut);
             } while ( thisWrite < 0 && errno == EINTR );
             if ( thisWrite < 0 ) return thisWrite;
-            numOut -= thisWrite;
-            subBuf += thisWrite;
+            numOut   -= thisWrite;
+            writePtr += thisWrite;
         }
     }
     return nWrite;
