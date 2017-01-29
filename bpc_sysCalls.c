@@ -673,6 +673,21 @@ int bpc_mkstemp(char *template, char *origFileName)
              */
             if ( LogLevel >= 4 ) bpc_logMsgf("bpc_mkstemp: copying attribs from %s to %s\n", origFileName, template);
             bpc_attrib_fileCopy(file, fileOrig);
+            /*
+             * Make sure the pool file exists; otherwise zero out the digest
+             */
+            if ( file->digest.len > 0 ) {
+                char poolPath[BPC_MAXPATHLEN];
+                STRUCT_STAT st;
+
+                bpc_digest_md52path(poolPath, file->compress, &file->digest);
+                if ( stat(poolPath, &st) ) {
+                    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_mkstemp: %s doesn't exist; ignoring digest for %s\n",
+                                                                poolPath, template);
+                    file->digest.len = 0;
+                    file->size = 0;
+                }
+            }
             file->nlinks = 0;
         } else {
             /*
@@ -812,7 +827,11 @@ int bpc_sysCall_poolFileCheck(char *fileName, struct file_struct *rsyncFile)
             foundPoolFile = 1;
         }
     } else {
+        /*
+         * For an empty file there is no corresponding pool file, so just say it matches
+         */
         foundPoolFile = 1;
+        poolPath[0] = '\0';
     }
     if ( foundPoolFile ) {
         bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, fileName, 1, 0);
