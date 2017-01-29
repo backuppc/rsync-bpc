@@ -701,7 +701,7 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
             /*
              * This is a benign error - just return as though there is an empty attrib file
              */
-            if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirRead: can't opendir %s\n", attribDirPath);
+            if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirRead: can't opendir %s (note: this is ok)\n", attribDirPath);
 	    return 0;
 	}
 	while ( (dp = readdir(dirOs)) ) {
@@ -1212,7 +1212,7 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
         bpc_logErrf("bpc_attrib_dirWrite: rename from %s to %s failed\n", attribPathTemp, attribPath);
         return -1;
     }
-    if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: created new attrib file %s\n", attribPath);
+    if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: created new attrib file %s\n", attribPath);
 
     if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x..., deltaInfo = %p \n",
                 digest.digest[0], digest.digest[1], digest.digest[2],
@@ -1237,7 +1237,7 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
             strcpy(attribPathTemp + attribPathLen, "0");
         }
         if ( !unlink(attribPathTemp) ) {
-            if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: removed old attrib file %s\n", attribPathTemp);
+            if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: removed old attrib file %s\n", attribPathTemp);
         } else {
             DIR *dirOs;
             struct dirent *dp;
@@ -1259,7 +1259,7 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
                 if ( strncmp(dp->d_name, "attrib", 6) || !strcmp(dp->d_name, p) ) continue;
                 snprintf(deletePath, sizeof(deletePath), "%s/%s", attribPath, dp->d_name);
                 unlink(deletePath);
-                if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: removed other old attrib file %s\n", attribPathTemp);
+                if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: removed other old attrib file %s\n", attribPathTemp);
             }
             closedir(dirOs);
         }
