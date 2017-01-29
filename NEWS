@@ -1,5 +1,11 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.5 released XX Jan 2017:
+
+    - Reference counting is now per-backup; replaced static delta information with callable interface.
+
+    - Attribute files are now zero-length with the md5 digest encoded in the file name.
+
 3.0.9.4 released 18 Jun 2016:
 
     - changes to backuppc/bpc_hashTable so that resizing doesn't move the entries. The nodes are stored as
