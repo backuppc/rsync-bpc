@@ -885,8 +885,19 @@ int bpc_unlink(const char *fileName)
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_unlink(%s)\n", fileName);
 
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
-        errno = ENOENT;
-        return -1;
+        /*
+         * See if the file is there, but it's the inode that is missing
+         */
+        if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 1)) ) {
+            errno = ENOENT;
+            return -1;
+        }
+        /*
+         * Hmmm, this shouldn't happen (file entry is present, but inode wasn't found)
+         */
+        if ( LogLevel >= 3 ) bpc_logMsgf("bpc_unlink(%s): type %d, size %lu, nlinks %u; inode %u missing; setting nlinks to 0\n",
+                                         fileName, file->type, file->size, file->nlinks, file->inode);
+        file->nlinks = 0;
     }
     if ( file->type == BPC_FTYPE_DIR ) {
         errno = EISDIR;
@@ -978,8 +989,20 @@ int bpc_lstat(const char *fileName, struct stat *buf)
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lstat(%s)\n", fileName);
 
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
-        errno = ENOENT;
-        return -1;
+        /*
+         * See if the file is there, but it's the inode that is missing
+         */
+        if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 1)) ) {
+            errno = ENOENT;
+            return -1;
+        }
+        /*
+         * Hmmm, this shouldn't happen (file entry is present, but inode wasn't found)
+         * This entry won't have a digest, so we won't be able to open the file.
+         */
+        if ( LogLevel >= 3 ) bpc_logMsgf("bpc_lstat(%s): type %d, size %lu, nlinks %u; inode %u missing; setting nlinks to 0\n",
+                                         fileName, file->type, file->size, file->nlinks, file->inode);
+        file->nlinks = 0;
     }
     if ( file->type == BPC_FTYPE_DELETED || file->type == BPC_FTYPE_UNKNOWN || file->type >= BPC_FTYPE_INVALID ) {
         errno = ENOENT;
@@ -1001,7 +1024,7 @@ int bpc_lstat(const char *fileName, struct stat *buf)
     buf->st_dev = 1;
     buf->st_ino = file->inode;
     buf->st_mode = file->mode;
-    buf->st_nlink = file->nlinks;
+    buf->st_nlink = file->nlinks == 0 ? 1 : file->nlinks;
     buf->st_uid = file->uid;
     buf->st_gid = file->gid;
     buf->st_rdev = rdev;
