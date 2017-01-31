@@ -397,11 +397,12 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
             }
         } else {
             /*
-             * must be a V3 file - look in the backup directory
+             * either we failed to read the digest (eg, missing inode), or it's a V3 file - look in the backup directory
              */
             bpc_attribCache_getFullMangledPath(&acNew, fullPath, (char*)fileName, file->backupNum);
             if ( bpc_fileZIO_open(&fdz, fullPath, 0, file->compress) ) {
-                bpc_logErrf("bpc_fileOpen: can't open V3 file %s (from %s, %d, %d)\n", fullPath, fd->fileName, file->compress, file->digest.len);
+                bpc_logErrf("bpc_fileOpen: can't open file %s (from %s, %d, %d, %d)\n",
+                            fullPath, fd->fileName, file->compress, file->digest.len, file->nlinks);
                 Stats.ErrorCnt++;
                 bpc_fileDescFree(fd);
                 return NULL;
