@@ -670,7 +670,7 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
          */
         if ( !strcmp(p + 1, "0") ) return 0;
         bpc_digest_str2digest(&dir->digest, p + 1);
-        if ( BPC_LogLevel >= 2 ) {
+        if ( BPC_LogLevel >= 6 ) {
             char str[256];
             bpc_digest_digest2str(&dir->digest, str);
             bpc_logMsgf("bpc_attrib_dirRead: called with attrib file %s: digest = %s, len = %d\n",
@@ -705,7 +705,6 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
 	    return 0;
 	}
 	while ( (dp = readdir(dirOs)) ) {
-	    if ( !strcmp(dp->d_name, ".") || !strcmp(dp->d_name, "..") ) continue;
 	    if ( strncmp(dp->d_name, attribFileName, attribFileNameLen) ) continue;
             p = dp->d_name + attribFileNameLen;
             if ( p[0] != '_' ) continue;
@@ -714,6 +713,9 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
                 /*
                  * An empty attrib file is legit; just return with no entries
                  */
+                if ( BPC_LogLevel >= 6 ) {
+                    bpc_logMsgf("bpc_attrib_dirRead: Got empty attrib file %s\n", dp->d_name);
+                }
 		closedir(dirOs);
 		return 0;
 	    }
@@ -753,6 +755,8 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
                 if ( rename(attribPath, attribPathTemp) ) {
                     bpc_logErrf("bpc_attrib_dirRead: rename of empty attrib file from %s to %s failed\n", attribPath, attribPathTemp);
                     return -1;
+                } else if ( BPC_LogLevel >= 6 ) {
+                    bpc_logMsgf("bpc_attrib_dirRead: renamed empty attrib file %s -> %s\n", attribPath, attribPathTemp);
                 }
             }
             return 0;
@@ -798,7 +802,7 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
             }
             close(fdNum);
             unlink(attribPath);
-            if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirRead: replaced %s with %s\n",
+            if ( BPC_LogLevel >= 4 ) bpc_logMsgf("bpc_attrib_dirRead: replaced %s with %s\n",
                                                     attribPath, attribPathNew);
         }
     }
@@ -1132,10 +1136,9 @@ static int bpc_attrib_dirWriteOld(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir
         bpc_logErrf("bpc_attrib_dirWrite: rename from %s to %s failed\n", attribPathTemp, attribPath);
         return -1;
     }
-    if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x..., deltaInfo = %p\n",
+    if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x...\n",
                 digest.digest[0], digest.digest[1], digest.digest[2],
-                oldDigest ? oldDigest->digest[0] : 0x0, oldDigest ? oldDigest->digest[1] : 0x0,
-                deltaInfo);
+                oldDigest ? oldDigest->digest[0] : 0x0, oldDigest ? oldDigest->digest[1] : 0x0);
 
     if ( oldDigest ) bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, oldDigest, -1);
     bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, &digest, 1);
@@ -1145,7 +1148,7 @@ static int bpc_attrib_dirWriteOld(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir
 
 int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, char *dirPath, char *attribFileName, bpc_digest *oldDigest)
 {
-    char attribPath[BPC_MAXPATHLEN], attribPathTemp[BPC_MAXPATHLEN];
+    char attribPath[BPC_MAXPATHLEN], attribPathTemp[BPC_MAXPATHLEN], *baseAttribFileName;
     bpc_digest digest;
     int status;
     OFF_T poolFileSize;
@@ -1153,12 +1156,24 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
     static write_info info;
     char *p;
     int fdNum;
-    size_t attribPathLen;
+    size_t attribPathLen, baseAttribFileNameLen;
 
     if ( WriteOldStyleAttribFile ) return bpc_attrib_dirWriteOld(deltaInfo, dir, dirPath, attribFileName, oldDigest);
 
+    /*
+     * baseAttribFileName points to the last portion of attribFileName, or the whole
+     * string if it doesn't contain '/'
+     */
+    if ( (baseAttribFileName = strrchr(attribFileName, '/')) ) {
+        baseAttribFileName++;
+    } else {
+        baseAttribFileName = attribFileName;
+    }
+    baseAttribFileNameLen = strlen(baseAttribFileName);
+
     bpc_attrib_attribFilePath(attribPath, dirPath, attribFileName);
-    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_dirWrite(%s)\n", attribPath);
+    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_dirWrite(%s): dirPath = %s, attribFileName = %s, baseAttribFileName = %s\n",
+                                          attribPath, dirPath, attribFileName, baseAttribFileName);
     snprintf(attribPathTemp, BPC_MAXPATHLEN, "%s.%d", attribPath, getpid());
     if ( (p = strrchr(attribPathTemp, '/')) ) {
         *p = '\0';
@@ -1214,10 +1229,9 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
     }
     if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: created new attrib file %s\n", attribPath);
 
-    if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x..., deltaInfo = %p \n",
+    if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x...\n",
                 digest.digest[0], digest.digest[1], digest.digest[2],
-                oldDigest ? oldDigest->digest[0] : 0x0, oldDigest ? oldDigest->digest[1] : 0x0,
-                deltaInfo);
+                oldDigest ? oldDigest->digest[0] : 0x0, oldDigest ? oldDigest->digest[1] : 0x0);
     bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, &digest, 1);
 
     if ( oldDigest ) {
@@ -1244,7 +1258,8 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
             char deletePath[BPC_MAXPATHLEN];
 
             /*
-             * Scan the directory and remove any other attribute files
+             * Scan the directory and remove any other attribute files that have the
+             * same root.
              */
             if ( !(p = strrchr(attribPath, '/')) ) {
                 bpc_logErrf("bpc_attrib_dirWrite: can't find a '/' in %s\n", attribPath);
@@ -1256,10 +1271,10 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
                 return -1;
             }
             while ( (dp = readdir(dirOs)) ) {
-                if ( strncmp(dp->d_name, "attrib", 6) || !strcmp(dp->d_name, p) ) continue;
+                if ( strncmp(dp->d_name, baseAttribFileName, baseAttribFileNameLen) || !strcmp(dp->d_name, p) ) continue;
                 snprintf(deletePath, sizeof(deletePath), "%s/%s", attribPath, dp->d_name);
                 unlink(deletePath);
-                if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: removed other old attrib file %s\n", attribPathTemp);
+                if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: removed other old attrib file %s\n", deletePath);
             }
             closedir(dirOs);
         }
