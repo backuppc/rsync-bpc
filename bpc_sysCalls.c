@@ -725,7 +725,6 @@ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct
 {
     bpc_attrib_file *fileOrig, *file;
     char poolPath[BPC_MAXPATHLEN];
-    STRUCT_STAT st;
 
     if ( !(fileOrig = bpc_attribCache_getFile(&acNew, fileName, 0, 0)) ) {
         /*
@@ -752,19 +751,22 @@ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct
      * make sure the pool file exists
      */
     bpc_digest_md52path(poolPath, CompressLevel, &fileOrig->digest);
-    if ( fileSize != 0 && stat(poolPath, &st) ) {
-        bpc_logErrf("bpc_sysCall_checkFileMatch(%s): got good match, but pool file %s doesn't exist - rewriting\n",
-                                    fileName, poolPath);
-        return -1;
-    }
-    if ( st.st_mode & S_IXOTH ) {
-        /*
-         * pool file is marked for deletion - safely unmark it since we are going to use it
-         */
-        if ( bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
-            bpc_logErrf("bpc_sysCall_checkFileMatch(%s): couldn't unmark pool file %s - rewriting\n",
+    if ( fileSize != 0 ) {
+        STRUCT_STAT st;
+        if ( stat(poolPath, &st) ) {
+            bpc_logErrf("bpc_sysCall_checkFileMatch(%s): got good match, but pool file %s doesn't exist - rewriting\n",
                                         fileName, poolPath);
             return -1;
+        }
+        if ( st.st_mode & S_IXOTH ) {
+            /*
+             * pool file is marked for deletion - safely unmark it since we are going to use it
+             */
+            if ( bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
+                bpc_logErrf("bpc_sysCall_checkFileMatch(%s): couldn't unmark pool file %s - rewriting\n",
+                                            fileName, poolPath);
+                return -1;
+            }
         }
     }
 
@@ -798,7 +800,6 @@ int bpc_sysCall_poolFileCheck(char *fileName, struct file_struct *rsyncFile)
 {
     bpc_digest digest;
     char poolPath[BPC_MAXPATHLEN];
-    STRUCT_STAT st;
     unsigned int ext;
     int foundPoolFile = 0;
 
@@ -812,6 +813,7 @@ int bpc_sysCall_poolFileCheck(char *fileName, struct file_struct *rsyncFile)
      */
     if ( F_LENGTH(rsyncFile) > 0 ) {
         for ( ext = 0 ; !foundPoolFile ; ext++ ) {
+            STRUCT_STAT st;
             bpc_digest_append_ext(&digest, ext);
             bpc_digest_md52path(poolPath, CompressLevel, &digest);
             if ( stat(poolPath, &st) ) break;
