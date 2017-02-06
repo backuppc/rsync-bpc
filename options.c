@@ -194,6 +194,7 @@ int bpc_backup_prev_num = -1;
 int bpc_backup_prev_compress;
 char *bpc_merge_bkup_info;
 int bpc_backup_inode0;
+int bpc_backup_attrib_new = 0;
 int bpc_log_level = 0;
 
 #define MAX_BATCH_NAME_LEN 256	/* Must be less than MAXPATHLEN-13 */
@@ -458,6 +459,7 @@ void usage(enum logcode F)
   rprintf(F,"     --bpc-bkup-prevcomp=NUM compression level for previous backup\n");
   rprintf(F,"     --bpc-bkup-merge=N/C/V,...  list of backups to merge, with number/compress/version for each\n");
   rprintf(F,"     --bpc-bkup-inode0=NUM   starting inode number for new backup\n");
+  rprintf(F,"     --bpc-attrib-new        use new-style attribute files\n");
   rprintf(F,"     --bpc-log-level=NUM     log level\n");
 
   rprintf(F,"\n");
@@ -690,6 +692,7 @@ static struct poptOption long_options[] = {
   {"bpc-bkup-prevcomp",0,  POPT_ARG_INT,    &bpc_backup_prev_compress, 0, 0, 0 },
   {"bpc-bkup-merge",   0,  POPT_ARG_STRING, &bpc_merge_bkup_info, 0, 0, 0 },
   {"bpc-bkup-inode0",  0,  POPT_ARG_INT,    &bpc_backup_inode0, 0, 0, 0 },
+  {"bpc-attrib-new",   0,  POPT_ARG_NONE,   &bpc_backup_attrib_new, 0, 0, 0 },
   {"bpc-log-level",    0,  POPT_ARG_INT,    &bpc_log_level, 0, 0, 0 },
   {0,0,0,0, 0, 0, 0}
 };

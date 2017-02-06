@@ -65,6 +65,7 @@ void bpc_sysCall_init(
             int prevCompress,           /* comperssion level for prior backup */
             char *mergeBkupInfo,        /* which backups to merge together on read */
             ino_t inode0,               /* starting inode number for this backup */
+            int attrib_new,             /* flag to turn on new-style attrib file names */
             int logLevel                /* logging level */
         )
 {
@@ -91,11 +92,11 @@ void bpc_sysCall_init(
     Stats.InodeCurr = Stats.Inode0 = inode0;
     LogLevel = logLevel;
     /*
-     * Write new-style attrib files (<= 4.0.0beta3 uses old-style), which are 0-length
-     * files with the digest encoded in the file name (eg: attrib_md5HexDigest). We
-     * can still read the old-style files, but we upgrade them as we go.
+     * If attrib_new, write new-style attrib files (<= 4.0.0beta3 uses old-style), which
+     * are 0-length files with the digest encoded in the file name (eg: attrib_md5HexDigest).
+     * We can still read the old-style files, but we upgrade them as we go.
      */
-    bpc_attrib_backwardCompat(0, 0);
+    bpc_attrib_backwardCompat(!attrib_new, !attrib_new);
     if ( mergeBkupInfo && *mergeBkupInfo ) {
         /*
          * Count number of backups to merge: 1 + number of commas.

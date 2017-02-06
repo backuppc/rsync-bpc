@@ -1466,11 +1466,12 @@ int main(int argc,char *argv[])
             extern int bpc_backup_prev_compress;
             extern char *bpc_merge_bkup_info;
             extern int bpc_backup_inode0;
+            extern int bpc_backup_attrib_new;
             extern int bpc_log_level;
 
             bpc_sysCall_init(bpc_top_dir, bpc_host_name, bpc_share_name,
                              bpc_backup_num, bpc_backup_compress, bpc_backup_prev_num, bpc_backup_prev_compress,
-                             bpc_merge_bkup_info, bpc_backup_inode0, bpc_log_level);
+                             bpc_merge_bkup_info, bpc_backup_inode0, bpc_backup_attrib_new, bpc_log_level);
         }
 
 	/* Initialize change_dir() here because on some old systems getcwd
