@@ -643,7 +643,7 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
     char attribPath[BPC_MAXPATHLEN];
     bpc_fileZIO_fd fd;
     size_t nRead;
-    uint32 magic;
+    uint32 magic = 0;
     uchar buf[8 * 65536], *bufP;
     STRUCT_STAT st;
     char *p, *attribFileName;
@@ -809,21 +809,23 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
 
     if ( dir->digest.len > 0 ) {
         /*
-         * Point at the pool file
+         * Handle V4+ case - open the pool file directly
+         * For V3, digest.len == 0 since we opened the attrib file above (it is stored hardlinked in the backup
+         * directory; there is no digest)
          */
         bpc_digest_md52path(attribPath, dir->compress, &dir->digest);
+        if ( bpc_fileZIO_open(&fd, attribPath, 0, dir->compress) ) {
+            bpc_logErrf("bpc_attrib_dirRead: can't open %s\n", attribPath);
+            return -1;
+        }
+        nRead = bpc_fileZIO_read(&fd, buf, sizeof(buf));
+        if ( nRead < 4 ) {
+            bpc_logErrf("bpc_attrib_dirRead: can't read at least 4 bytes from %s\n", attribPath);
+            bpc_fileZIO_close(&fd);
+            return -1;
+        }
+        magic = CONV_BUF_TO_UINT32(buf);
     }
-    if ( bpc_fileZIO_open(&fd, attribPath, 0, dir->compress) ) {
-        bpc_logErrf("bpc_attrib_dirRead: can't open %s\n", attribPath);
-        return -1;
-    }
-    nRead = bpc_fileZIO_read(&fd, buf, sizeof(buf));
-    if ( nRead < 4 ) {
-        bpc_logErrf("bpc_attrib_dirRead: can't read at least 4 bytes from %s\n", attribPath);
-        bpc_fileZIO_close(&fd);
-        return -1;
-    }
-    magic = CONV_BUF_TO_UINT32(buf);
     bufP = buf + 4;
 
     if ( magic == BPC_ATTRIB_TYPE_XATTR ) {
