@@ -316,7 +316,18 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
          * We figure out the list of candidate files to match.  If there are any
          * new digest files then we just try to match them.  Otherwise we also
          * try to match any old V3 files.
+         *
+         * Since the empty file is never stored in the pool, we have to make sure
+         * that any digest that collides (ie: 0xd41d8cd98f00b204e9800998ecf8427e)
+         * doesn't use the first slot (ie: make sure it has an extension > 0)
          */
+        static uchar zeroLenMD5[] = {
+            0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8, 0x42, 0x7e
+        };
+        if ( info->fileSize > 0 && !memcmp(info->digest.digest, zeroLenMD5, sizeof(zeroLenMD5)) ) {
+            ext++;
+        }
+
         info->digestExtZeroLen = -1;
         while ( 1 ) {
             char poolPath[BPC_MAXPATHLEN];
