@@ -29,6 +29,7 @@ void bpc_sysCall_init(
             int prevCompress,           /* comperssion level for prior backup */
             char *mergeBkupInfo,        /* which backups to merge together on read */
             ino_t inode0,               /* starting inode number for this backup */
+            int attrib_new,             /* flag to turn on new-style attrib file names */
             int logLevel                /* logging level */
         );
 void bpc_am_generator(int generator, int pid);
