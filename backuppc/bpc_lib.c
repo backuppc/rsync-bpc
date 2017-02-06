@@ -135,17 +135,28 @@ void bpc_digest_str2digest(bpc_digest *digest, char *hexStr)
 
 void bpc_digest_md52path(char *path, int compress, bpc_digest *digest)
 {
-    uint b0 = digest->digest[0] & 0xfe;
-    uint b1 = digest->digest[1] & 0xfe;
     char *out;
 
+#if 0
+    /*
+     * Test code to create collisions in pool files.
+     * If you turn on this test, you should also force the zeroLenMD5
+     * digest comparison in bpc_poolWrite_write() to true.
+     */
+    bpc_digest fixedDigest = *digest;
+    static uchar fixedMD5[] = {
+        0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8, 0x42, 0x7e
+    };
+    digest = &fixedDigest;
+    memcpy(digest->digest, fixedMD5, sizeof(fixedMD5));
+#endif
     strncpy(path, compress ? BPC_CPoolDir : BPC_PoolDir, BPC_MAXPATHLEN - 32);
     path[BPC_MAXPATHLEN - 48] = '\0';
     out = path + strlen(path);
     *out++ = '/';
-    bpc_byte2hex(out, b0); out += 2;
+    bpc_byte2hex(out, digest->digest[0] & 0xfe); out += 2;
     *out++ = '/';
-    bpc_byte2hex(out, b1); out += 2;
+    bpc_byte2hex(out, digest->digest[1] & 0xfe); out += 2;
     *out++ = '/';
     bpc_digest_digest2str(digest, out);
 }
