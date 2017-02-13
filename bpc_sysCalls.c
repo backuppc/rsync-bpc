@@ -23,6 +23,13 @@
 #define MAX_FD          (64)
 #define MAX_BUF_SZ      (8 << 20)               /* 8MB */
 
+/*
+ * A freelist of unused MAX_BUF_SZ sized-buffers.
+ * We use the first sizeof(void*) bytes of the buffer as a single-linked
+ * list, with a NULL at the end
+ */
+static void *DataBufferFreeList = (void*)NULL;
+
 extern int am_generator;
 extern int always_checksum;
 extern int protocol_version;
@@ -275,8 +282,11 @@ static void bpc_fileDescFree(FdInfo *fd)
         close(fd->tmpFd);
         fd->tmpFd = -1;
     }
-    if ( fd->fileName )    free(fd->fileName);
-    if ( fd->buffer )      free(fd->buffer);
+    if ( fd->fileName ) free(fd->fileName);
+    if ( fd->buffer ) {
+        *(void**)fd->buffer = DataBufferFreeList;
+        DataBufferFreeList  = fd->buffer;
+    }
     if ( fd->tmpFileName ) {
         unlink(fd->tmpFileName);
         free(fd->tmpFileName);
@@ -370,9 +380,21 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
     fd->dirty      = 0;
     fd->fileName   = malloc(strlen(fileName) + 1);
     fd->bufferSize = MAX_BUF_SZ;
-    fd->buffer     = malloc(fd->bufferSize * sizeof(fd->buffer[0]));
+    if ( DataBufferFreeList ) {
+        fd->buffer = DataBufferFreeList;
+        DataBufferFreeList = *(void**)DataBufferFreeList;
+    } else {
+        fd->buffer = malloc(fd->bufferSize * sizeof(fd->buffer[0]));
+    }
     fd->fileSize   = 0;
     if ( !fd->fileName || !fd->buffer ) {
+        if ( !fd->fileName ) {
+            bpc_logErrf("bpc_fileOpen: fatal error: can't allocate %lu bytes for file %s\n",
+                                strlen(fileName) + 1, fileName);
+        }
+        if ( !fd->buffer ) {
+            bpc_logErrf("bpc_fileOpen: fatal error: can't allocate %lu bytes for data buffer\n", MAX_BUF_SZ);
+        }
         bpc_fileDescFree(fd);
         return NULL;
     }
