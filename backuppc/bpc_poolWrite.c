@@ -28,6 +28,13 @@ static uint32 PoolWriteCnt = 0;
 #define COMPARE_BUF_SZ     (1 << 20)     /* 1.0 MB */
 static uchar TempBuf[2 * COMPARE_BUF_SZ];
 
+/*
+ * A freelist of unused BPC_POOL_WRITE_BUF_SZ sized-buffers.
+ * We use the first sizeof(void*) bytes of the buffer as a single-linked
+ * list, with a NULL at the end.
+ */
+static void *DataBufferFreeList = (void*)NULL;
+
 int bpc_poolWrite_open(bpc_poolWrite_info *info, int compress, bpc_digest *digest)
 {
     int i;
@@ -49,7 +56,12 @@ int bpc_poolWrite_open(bpc_poolWrite_info *info, int compress, bpc_digest *diges
     for ( i = 0 ; i < BPC_POOL_WRITE_CONCURRENT_MATCH ; i++ ) {
         info->match[i].used = 0;
     }
-    info->buffer        = malloc(BPC_POOL_WRITE_BUF_SZ);
+    if ( DataBufferFreeList ) {
+        info->buffer = DataBufferFreeList;
+        DataBufferFreeList = *(void**)DataBufferFreeList;
+    } else {
+        info->buffer = malloc(BPC_POOL_WRITE_BUF_SZ);
+    }
     if ( !info->buffer ) {
         bpc_logErrf("bpc_poolWrite_open: can't allocate %d bytes for buffer\n", BPC_POOL_WRITE_BUF_SZ);
         return -1;
@@ -593,7 +605,8 @@ void bpc_poolWrite_cleanup(bpc_poolWrite_info *info)
         info->match[i].used = 0;
     }
     if ( info->buffer ) {
-        free(info->buffer);
+        *(void**)info->buffer = DataBufferFreeList;
+        DataBufferFreeList  = info->buffer;
         info->buffer = NULL;
     }
 }

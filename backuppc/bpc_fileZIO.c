@@ -20,6 +20,13 @@
 #include "backuppc.h"
 
 /*
+ * A freelist of unused data buffers.
+ * We use the first sizeof(void*) bytes of the buffer as a single-linked
+ * list, with a NULL at the end.
+ */
+static void *DataBufferFreeList = (void*)NULL;
+
+/*
  * Open a regular or compressed file for reading or writing/create
  */
 int bpc_fileZIO_open(bpc_fileZIO_fd *fd, char *fileName, int writeFile, int compressLevel)
@@ -43,8 +50,14 @@ int bpc_fileZIO_open(bpc_fileZIO_fd *fd, char *fileName, int writeFile, int comp
     fd->lineBufEof     = 0;
 
     fd->bufSize = 1 << 20;       /* 1MB */
-    if ( !(fd->buf = malloc(fd->bufSize)) ) {
-        bpc_logErrf("bpc_fileZIO_open: can't allocate %u bytes\n", (unsigned)fd->bufSize);
+    if ( DataBufferFreeList ) {
+        fd->buf = DataBufferFreeList;
+        DataBufferFreeList = *(void**)DataBufferFreeList;
+    } else {
+        fd->buf = malloc(fd->bufSize);
+    }
+    if ( !fd->buf ) {
+        bpc_logErrf("bpc_fileZIO_open: fatal error: can't allocate %u bytes\n", (unsigned)fd->bufSize);
         return -1;
     }
 
@@ -346,8 +359,11 @@ int bpc_fileZIO_close(bpc_fileZIO_fd *fd)
     close(fd->fd);
     if ( fd->lineBuf ) free(fd->lineBuf);
     fd->lineBuf = NULL;
-    if ( fd->buf ) free(fd->buf);
-    fd->buf = NULL;
+    if ( fd->buf ) {
+        *(void**)fd->buf = DataBufferFreeList;
+        DataBufferFreeList  = fd->buf;
+        fd->buf = NULL;
+    }
     fd->fd = -1;
     return 0;
 }
