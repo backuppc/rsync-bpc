@@ -98,7 +98,7 @@ void get_checksum2(char *buf, int32 len, char *sum)
 	}
 }
 
-void file_checksum(char *fname, char *sum, OFF_T size)
+int file_checksum(char *fname, char *sum, OFF_T size)
 {
 	struct map_struct *buf;
 	OFF_T i, len = size;
@@ -112,13 +112,19 @@ void file_checksum(char *fname, char *sum, OFF_T size)
          * Try to grab the digest from the attributes, which are both MD5 for protocol >= 30.
          * Otherwise fall through and do it the slow way.
          */
-        if ( protocol_version >= 30 && !bpc_file_checksum(fname, sum, MD5_DIGEST_LEN) ) {
-            return;
+        if ( protocol_version >= 30 ) {
+            if ( !bpc_file_checksum(fname, sum, MD5_DIGEST_LEN) ) return 0;
+            /*
+             * if bpc_file_checksum() fails on an empty file it likely means we have a wrong
+             * digest, so don't recompute; this will cause the file to get re-transfered and
+             * the digest will be updated.
+             */
+            if ( size == 0 ) return -1;
         }
 
 	fd = do_open(fname, O_RDONLY, 0);
 	if (fd == -1)
-		return;
+		return -1;
 
 	buf = map_file(fd, size, MAX_MAP_SIZE, CSUM_CHUNK);
 
@@ -156,6 +162,7 @@ void file_checksum(char *fname, char *sum, OFF_T size)
 
 	bpc_close(fd);
 	unmap_file(buf);
+        return 0;
 }
 
 static int32 sumresidue;

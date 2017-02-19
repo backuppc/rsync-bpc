@@ -80,7 +80,7 @@ int bpc_lremovexattr(const char *path, const char *name);
 ssize_t bpc_llistxattr(const char *path, char *list, size_t size);
 uint32 get_checksum1(char *buf1, int32 len);
 void get_checksum2(char *buf, int32 len, char *sum);
-void file_checksum(char *fname, char *sum, OFF_T size);
+int file_checksum(char *fname, char *sum, OFF_T size);
 void sum_init(int seed);
 void sum_update(const char *p, int32 len);
 int sum_end(char *sum);

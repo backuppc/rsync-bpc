@@ -400,7 +400,7 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
     }
     strcpy(fd->fileName, fileName);
 
-    if ( file && file->size > 0 && !(flags & O_TRUNC) ) {
+    if ( file && !(flags & O_TRUNC) ) {
         char fullPath[BPC_MAXPATHLEN];
         bpc_fileZIO_fd fdz;
 
@@ -1134,7 +1134,7 @@ int bpc_file_checksum(char *fileName, char *sum, int checksum_len)
     STRUCT_STAT st;
 
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_file_checksum(%s)\n", fileName);
-    if ( !file || file->digest.len < checksum_len ) return -1;
+    if ( !file || file->digest.len < checksum_len ) return -2;
     /*
      * check the pool file actually exists before returning the digest.
      */

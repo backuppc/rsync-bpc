@@ -761,7 +761,7 @@ int unchanged_file(char *fn, struct file_struct *file, STRUCT_STAT *st)
 	   of the file time to determine whether to sync */
 	if (always_checksum > 0 && S_ISREG(st->st_mode)) {
 		char sum[MAX_DIGEST_LEN];
-                file_checksum(fn, sum, st->st_size);
+                int csumError = file_checksum(fn, sum, st->st_size);
             /*
                 {
                     uchar *p = (uchar*)F_SUM(file);
@@ -771,7 +771,7 @@ int unchanged_file(char *fn, struct file_struct *file, STRUCT_STAT *st)
                                     sum[0] & 0xff, sum[1] & 0xff, sum[2] & 0xff, sum[3] & 0xff);
                 }
             */
-		if ( memcmp(sum, F_SUM(file), checksum_len) ) return 0;
+		if ( csumError || memcmp(sum, F_SUM(file), checksum_len) ) return 0;
 	}
 
 	if (size_only > 0)

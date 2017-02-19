@@ -137,6 +137,12 @@ void bpc_digest_md52path(char *path, int compress, bpc_digest *digest)
 {
     char *out;
 
+    /*
+     * MD5 digest of an empty file (ie, md5sum /dev/null)
+     */
+    static uchar emptyFileMD5[] = {
+        0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8, 0x42, 0x7e
+    };
 #if 0
     /*
      * Test code to create collisions in pool files.
@@ -144,12 +150,13 @@ void bpc_digest_md52path(char *path, int compress, bpc_digest *digest)
      * digest comparison in bpc_poolWrite_write() to true.
      */
     bpc_digest fixedDigest = *digest;
-    static uchar fixedMD5[] = {
-        0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8, 0x42, 0x7e
-    };
     digest = &fixedDigest;
-    memcpy(digest->digest, fixedMD5, sizeof(fixedMD5));
+    memcpy(digest->digest, emptyFileMD5, sizeof(emptyFileMD5));
 #endif
+    if ( digest->len == sizeof(emptyFileMD5) && !memcmp(digest->digest, emptyFileMD5, sizeof(emptyFileMD5)) ) {
+        strcpy(path, "/dev/null");
+        return;
+    }
     strncpy(path, compress ? BPC_CPoolDir : BPC_PoolDir, BPC_MAXPATHLEN - 32);
     path[BPC_MAXPATHLEN - 48] = '\0';
     out = path + strlen(path);
