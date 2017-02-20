@@ -53,10 +53,9 @@ static uint32 FreeListSz;
  */
 static bpc_hashtable_key *bpc_hashtable_entryAlloc(uint32 size)
 {
-    uint32 freeListIdx;
+    uint32 freeListIdx = FREELIST_SIZE2IDX(size);
     bpc_hashtable_key *key;
 
-    freeListIdx = FREELIST_SIZE2IDX(size);
     size = FREELIST_IDX2SIZE(freeListIdx);
     if ( freeListIdx >= FreeListSz ) {
         /*
@@ -83,9 +82,9 @@ static bpc_hashtable_key *bpc_hashtable_entryAlloc(uint32 size)
         /*
          * chain all the buffers together in a linked list
          */
+        key = (bpc_hashtable_key*)newBuf;
         for ( i = 0 ; i < FREELIST_ALLOC_CNT - 1 ; i++ ) {
-            key = (bpc_hashtable_key*)newBuf;
-            key->key = (void*)(newBuf + size);
+            key->key = (void*)key + size;
             key = key->key;
         }
         key->key = NULL;
@@ -101,10 +100,8 @@ static bpc_hashtable_key *bpc_hashtable_entryAlloc(uint32 size)
  */
 static void bpc_hashtable_entryFree(bpc_hashtable_key *key, uint32 size)
 {
-    uint32 freeListIdx;
+    uint32 freeListIdx = FREELIST_SIZE2IDX(size);
 
-    freeListIdx = FREELIST_SIZE2IDX(size);
-    size = FREELIST_IDX2SIZE(freeListIdx);
     key->key = FreeList[freeListIdx];
     FreeList[freeListIdx] = key;
 }
