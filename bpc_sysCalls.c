@@ -400,7 +400,7 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
     }
     strcpy(fd->fileName, fileName);
 
-    if ( file && !(flags & O_TRUNC) ) {
+    if ( file && !(flags & O_TRUNC) && !(file->isTemp && file->size == 0) ) {
         char fullPath[BPC_MAXPATHLEN];
         bpc_fileZIO_fd fdz;
 
@@ -725,9 +725,13 @@ int bpc_mkstemp(char *template, char *origFileName)
         }
         file->isTemp = 1;
         bpc_attribCache_setFile(&acNew, template, file, 0);
-        if ( !(fd = bpc_fileOpen(&acNew, template, O_RDWR | O_CREAT)) ) return -1;
-        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_mkstemp: returning %s, fd = %d\n",
-                                template, fd->fdNum);
+        if ( !(fd = bpc_fileOpen(&acNew, template, O_RDWR | O_CREAT)) ) {
+            if ( LogLevel >= 4 ) bpc_logMsgf("bpc_mkstemp: bpc_fileOpen(%s,...) failed, size = %d, digestLen = %d\n",
+                                    template, file->size, file->digest.len);
+            return -1;
+        }
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_mkstemp: returning %s, fd = %d (size = %d, digestLen = %d)\n",
+                                template, fd->fdNum, file->size, file->digest.len);
         return fd->fdNum;
     }
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_mkstemp: returning -1\n");
