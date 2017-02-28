@@ -407,11 +407,15 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
         /*
          * need to read existing file
          */
-        if ( file->digest.len > 0 ) {
+        if ( file->digest.len > 0 || file->size == 0 ) {
             /*
              * all non-empty V4+ files have digests, so use the digest to look in the pool
              */
-            bpc_digest_md52path(fullPath, file->compress, &file->digest);
+            if ( file->digest.len > 0 ) {
+                bpc_digest_md52path(fullPath, file->compress, &file->digest);
+            } else {
+                strcpy(fullPath, "/dev/null");
+            }
             if ( bpc_fileZIO_open(&fdz, fullPath, 0, file->compress) ) {
                 bpc_logErrf("bpc_fileOpen: can't open pool file %s (from %s, %d, %d)\n", fullPath, fd->fileName, file->compress, file->digest.len);
                 Stats.ErrorCnt++;
