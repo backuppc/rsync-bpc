@@ -969,12 +969,12 @@ static void bpc_attrib_xattrWrite(bpc_attrib_xattr *xattr, buf_info *info)
     setVarInt(&info->bufP, info->bufEnd, xattr->key.keyLen);
     setVarInt(&info->bufP, info->bufEnd, xattr->valueLen);
 
-    if ( info->bufP + xattr->key.keyLen < info->bufEnd ) {
+    if ( info->bufP + xattr->key.keyLen <= info->bufEnd ) {
         memcpy(info->bufP, xattr->key.key, xattr->key.keyLen);
     }
     info->bufP += xattr->key.keyLen;
 
-    if ( info->bufP + xattr->valueLen < info->bufEnd ) {
+    if ( info->bufP + xattr->valueLen <= info->bufEnd ) {
         memcpy(info->bufP, xattr->value, xattr->valueLen);
     }
     info->bufP += xattr->valueLen;
@@ -1012,7 +1012,7 @@ uchar *bpc_attrib_file2buf(bpc_attrib_file *file, uchar *buf, uchar *bufEnd)
     setVarInt(&bufP, bufEnd, file->nlinks);
     setVarInt(&bufP, bufEnd, file->digest.len);
 
-    if ( bufP + file->digest.len < bufEnd ) {
+    if ( bufP + file->digest.len <= bufEnd ) {
         memcpy(bufP, file->digest.digest, file->digest.len);
     }
     bufP += file->digest.len;
@@ -1026,7 +1026,7 @@ uchar *bpc_attrib_file2buf(bpc_attrib_file *file, uchar *buf, uchar *bufEnd)
 
 static void bpc_attrib_fileWrite(bpc_attrib_file *file, write_info *info)
 {
-    uchar *bufP = bpc_attrib_file2buf(file, info->bufP, info->buf + sizeof(info->buf));
+    uchar *bufP;
 
     if ( file->isTemp ) {
         if ( BPC_LogLevel >= 6 ) bpc_logMsgf("Skipping temp file %s: type = %d, mode = 0%o, uid/gid = %lu/%lu, size = %lu, inode = %lu, nlinks = %d, digest = 0x%02x%02x%02x..., bufUsed = %lu\n",
@@ -1037,6 +1037,7 @@ static void bpc_attrib_fileWrite(bpc_attrib_file *file, write_info *info)
                 (unsigned long)(info->bufP - info->buf));
         return;
     }
+    bufP = bpc_attrib_file2buf(file, info->bufP, info->buf + sizeof(info->buf));
     if ( BPC_LogLevel >= 6 ) bpc_logMsgf("Wrote file %s: type = %d, mode = 0%o, uid/gid = %lu/%lu, size = %lu, inode = %lu, nlinks = %d, digest = 0x%02x%02x%02x..., bufUsed = %lu\n",
                 file->name, file->type, file->mode,
                 (unsigned long)file->uid, (unsigned long)file->gid,
