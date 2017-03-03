@@ -232,7 +232,7 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                 info->fdOpen = 1;
                 md5_begin(&info->md5);
                 if ( info->bufferIdx > 0 ) {
-                    if ( (writeRet = bpc_fileZIO_write(&info->fd, info->buffer, info->bufferIdx)) != info->bufferIdx ) {
+                    if ( (writeRet = bpc_fileZIO_write(&info->fd, info->buffer, info->bufferIdx)) != (signed)info->bufferIdx ) {
                         info->errorCnt++;
                         bpc_logErrf("bpc_poolWrite_write: write of %lu bytes to %s failed, return = %d",
                                                     (unsigned long)info->bufferIdx, info->tmpFileName, (int)writeRet);

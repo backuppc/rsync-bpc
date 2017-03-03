@@ -218,7 +218,7 @@ static void bpc_attrib_xattrListKey(bpc_attrib_xattr *xattr, xattrList_info *inf
         }
     }
     if ( info->list ) {
-        if ( info->idx + xattr->key.keyLen > info->listLen ) {
+        if ( info->idx + (signed)xattr->key.keyLen > info->listLen ) {
             info->idx = -1;
             return;
         }
