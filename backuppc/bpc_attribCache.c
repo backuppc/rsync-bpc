@@ -92,11 +92,15 @@ void bpc_attribCache_setCurrentDirectory(bpc_attribCache_info *ac, char *dir)
 /*
  * Given a backup path, split it into the directory, file name, and path to the directory (starting
  * with the share name, ie: relative to ac->backupTopDir).
+ *
+ * splitPath will strip trailing "/." or "/" before splitting the path, but isn't capable of handling
+ * paths with "/." in the middle, or ".." anywhere.
  */
 static void splitPath(bpc_attribCache_info *ac, char *dir, char *fileName, char *attribPath, char *path)
 {
     char *dirOrig = dir;
     char fullPath[BPC_MAXPATHLEN];
+    size_t pathLen;
 
     /*
      * if this is a relative path, prepend ac->currentDir (provided ac->currentDir is set)
@@ -106,6 +110,21 @@ static void splitPath(bpc_attribCache_info *ac, char *dir, char *fileName, char 
         while ( path[0] == '/' ) path++;
         snprintf(fullPath, BPC_MAXPATHLEN, "%s/%s", ac->currentDir, path);
         path = fullPath;
+    }
+    pathLen = strlen(path);
+    while ( (pathLen > 1 && path[pathLen - 2] == '/' && path[pathLen - 1] == '.')
+         || (pathLen > 0 && path[pathLen - 1] == '/') ) {
+        if ( path != fullPath ) {
+            strncpy(fullPath, path, BPC_MAXPATHLEN);
+            path = fullPath;
+        }
+        if ( path[pathLen - 1] == '/' ) {
+            pathLen -= 1;
+        } else {
+            pathLen -= 2;
+        }
+        path[pathLen] = '\0';
+        if ( BPC_LogLevel >= 9 ) bpc_logMsgf("splitPath: trimming path = '%s'\n", path);
     }
     if ( !path[0] || (!path[1] && (path[0] == '.' || path[0] == '/')) ) {
         strcpy(fileName, ac->shareNameUM);
@@ -559,7 +578,7 @@ static void bpc_attribCache_getDirEntry(bpc_attrib_file *file, dirEntry_info *in
 ssize_t bpc_attribCache_getDirEntries(bpc_attribCache_info *ac, char *path, char *entries, ssize_t entrySize)
 {
     bpc_attribCache_dir *attr;
-    char fileName[BPC_MAXPATHLEN];
+    char fileName[BPC_MAXPATHLEN], fullPath[BPC_MAXPATHLEN];
     dirEntry_info info;
     size_t pathLen = strlen(path);
     ino_t inode = 0;
@@ -569,13 +588,16 @@ ssize_t bpc_attribCache_getDirEntries(bpc_attribCache_info *ac, char *path, char
      */
     if ( pathLen >= BPC_MAXPATHLEN - 3 ) return -1;
     if ( pathLen == 1 && path[0] == '.' ) {
-        strcpy(path, "/x");
-        attr = bpc_attribCache_loadPath(ac, fileName, path);
+        if ( ac->currentDir[0] ) {
+            snprintf(fullPath, BPC_MAXPATHLEN, "%s/x", ac->currentDir);
+        } else {
+            strcpy(fullPath, "/x");
+        }
+        attr = bpc_attribCache_loadPath(ac, fileName, fullPath);
         strcpy(path, ".");
     } else {
-        strcpy(path + pathLen, "/x");
-        attr = bpc_attribCache_loadPath(ac, fileName, path);
-        path[pathLen] = '\0';
+        snprintf(fullPath, BPC_MAXPATHLEN, "%s/x", path);
+        attr = bpc_attribCache_loadPath(ac, fileName, fullPath);
     }
     if ( !attr ) return -1;
     attr->lruCnt = ac->cacheLruCnt++;
