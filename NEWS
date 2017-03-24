@@ -1,5 +1,10 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.6 released 23 Mar 2017:
+
+    - updates to bpc_attribCache to sanitize path names and prepending ac->currentDir
+      in bpc_attribCache_getDirEntries().  Fixes certain restore cases.
+
 3.0.9.5 released 3 Mar 2017:
 
     - Reference counting is now per-backup; replaced static delta information with callable interface.
