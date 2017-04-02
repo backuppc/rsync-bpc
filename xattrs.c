@@ -3,7 +3,7 @@
  * Written by Jay Fenlason, vaguely based on the ACLs patch.
  *
  * Copyright (C) 2004 Red Hat, Inc.
- * Copyright (C) 2006-2009 Wayne Davison
+ * Copyright (C) 2006-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@
 
 #include "rsync.h"
 #include "ifuncs.h"
+#include "inums.h"
 #include "lib/sysxattrs.h"
 
 #ifdef SUPPORT_XATTRS
@@ -122,7 +123,7 @@ static int rsync_xal_compare_names(const void *x1, const void *x2)
 static ssize_t get_xattr_names(const char *fname)
 {
 	ssize_t list_len;
-	double arg;
+	int64 arg;
 
 	if (!namebuf) {
 		namebuf_len = 1024;
@@ -140,11 +141,11 @@ static ssize_t get_xattr_names(const char *fname)
 		} else if (errno == ENOTSUP)
 			return 0;
 		else if (errno != ERANGE) {
-			arg = (double)namebuf_len;
+			arg = namebuf_len;
 		  got_error:
 			rsyserr(FERROR_XFER, errno,
-				"get_xattr_names: llistxattr(\"%s\",%.0f) failed",
-				full_fname(fname), arg);
+				"get_xattr_names: llistxattr(\"%s\",%s) failed",
+				full_fname(fname), big_num(arg));
 			return -1;
 		}
 		list_len = sys_llistxattr(fname, NULL, 0);
@@ -218,7 +219,7 @@ static int rsync_xal_get(const char *fname, item_list *xalp)
 	size_t datum_len, name_offset;
 	char *name, *ptr;
 #ifdef HAVE_LINUX_XATTRS
-	int user_only = am_sender ? 0 : am_root <= 0;
+	int user_only = am_sender ? 0 : !am_root;
 #endif
 	rsync_xa *rxa;
 	int count;
@@ -307,7 +308,8 @@ int get_xattr(const char *fname, stat_x *sxp)
 		if (!preserve_devices)
 #endif
 			return 0;
-	}
+	} else if (IS_MISSING_FILE(sxp->st))
+		return 0;
 
 	if (rsync_xal_get(fname, sxp->xattr) < 0) {
 		free_xattr(sxp);
@@ -322,7 +324,7 @@ int copy_xattrs(const char *source, const char *dest)
 	size_t datum_len;
 	char *name, *ptr;
 #ifdef HAVE_LINUX_XATTRS
-	int user_only = am_root <= 0;
+	int user_only = am_sender ? 0 : am_root <= 0;
 #endif
 
 	/* This puts the name list into the "namebuf" buffer. */
@@ -450,7 +452,7 @@ int send_xattr(int f, stat_x *sxp)
 			if (rxa->datum_len > MAX_FULL_DATUM)
 				write_buf(f, rxa->datum + 1, MAX_DIGEST_LEN);
 			else
-				write_buf(f, rxa->datum, rxa->datum_len);
+				write_bigbuf(f, rxa->datum, rxa->datum_len);
 		}
 		ndx = rsync_xal_l.count; /* pre-incremented count */
 		rsync_xal_store(sxp->xattr); /* adds item to rsync_xal_l */
@@ -578,7 +580,7 @@ void send_xattr_request(const char *fname, struct file_struct *file, int f_out)
 			}
 
 			write_varint(f_out, len); /* length might have changed! */
-			write_buf(f_out, ptr, len);
+			write_bigbuf(f_out, ptr, len);
 			free(ptr);
 		}
 	}
@@ -609,9 +611,10 @@ int recv_xattr_request(struct file_struct *file, int f_in)
 	num = 0;
 	while ((rel_pos = read_varint(f_in)) != 0) {
 		num += rel_pos;
-		while (cnt && rxa->num < num) {
-		    rxa++;
-		    cnt--;
+		/* Note that the sender-related num values may not be in order on the receiver! */
+		while (cnt && (am_sender ? rxa->num < num : rxa->num != num)) {
+			rxa++;
+			cnt--;
 		}
 		if (!cnt || rxa->num != num) {
 			rprintf(FERROR, "[%s] could not find xattr #%d for %s\n",
@@ -665,7 +668,7 @@ void receive_xattr(int f, struct file_struct *file)
 	if (ndx < 0 || (size_t)ndx > rsync_xal_l.count) {
 		rprintf(FERROR, "receive_xattr: xa index %d out of"
 			" range for %s\n", ndx, f_name(file, NULL));
-		exit_cleanup(RERR_PROTOCOL);
+		exit_cleanup(RERR_STREAMIO);
 	}
 
 	if (ndx != 0) {

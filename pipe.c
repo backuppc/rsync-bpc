@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2004-2009 Wayne Davison
+ * Copyright (C) 2004-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,8 +26,10 @@ extern int am_sender;
 extern int am_server;
 extern int blocking_io;
 extern int filesfrom_fd;
-extern mode_t orig_umask;
+extern int munge_symlinks;
 extern char *logfile_name;
+extern int remote_option_cnt;
+extern const char **remote_options;
 extern struct chmod_mode_struct *chmod_modes;
 
 /**
@@ -49,7 +51,7 @@ pid_t piped_child(char **command, int *f_in, int *f_out)
 	int to_child_pipe[2];
 	int from_child_pipe[2];
 
-	if (verbose >= 2)
+	if (DEBUG_GTE(CMD, 1))
 		print_child_argv("opening connection using:", command);
 
 	if (fd_pair(to_child_pipe) < 0 || fd_pair(from_child_pipe) < 0) {
@@ -75,7 +77,6 @@ pid_t piped_child(char **command, int *f_in, int *f_out)
 			close(to_child_pipe[0]);
 		if (from_child_pipe[1] != STDOUT_FILENO)
 			close(from_child_pipe[1]);
-		umask(orig_umask);
 		set_blocking(STDIN_FILENO);
 		if (blocking_io > 0)
 			set_blocking(STDOUT_FILENO);
@@ -131,12 +132,22 @@ pid_t local_child(int argc, char **argv, int *f_in, int *f_out,
 		am_sender = 0;
 		am_server = 1;
 		filesfrom_fd = -1;
+		munge_symlinks = 0; /* Each side needs its own option. */
 		chmod_modes = NULL; /* Let the sending side handle this. */
 
 		/* Let the client side handle this. */
 		if (logfile_name) {
 			logfile_name = NULL;
 			logfile_close();
+		}
+
+		if (remote_option_cnt) {
+			int rc = remote_option_cnt + 1;
+			const char **rv = remote_options;
+			if (!parse_arguments(&rc, &rv)) {
+				option_error();
+				exit_cleanup(RERR_SYNTAX);
+			}
 		}
 
 		if (dup2(to_child_pipe[0], STDIN_FILENO) < 0 ||

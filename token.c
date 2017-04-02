@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,10 +20,11 @@
  */
 
 #include "rsync.h"
-#include "ifuncs.h"
-#include "zlib/zlib.h"
+#include "itypes.h"
+#include <zlib.h>
 
 extern int do_compression;
+extern int protocol_version;
 extern int module_id;
 extern int def_compress_level;
 extern char *skip_compress;
@@ -308,7 +309,7 @@ send_deflated_token(int f, int32 token, struct map_struct *buf, OFF_T offset,
 					 Z_DEFLATED, -15, 8,
 					 Z_DEFAULT_STRATEGY) != Z_OK) {
 				rprintf(FERROR, "compression init failed\n");
-				exit_cleanup(RERR_STREAMIO);
+				exit_cleanup(RERR_PROTOCOL);
 			}
 			if ((obuf = new_array(char, OBUF_SIZE)) == NULL)
 				out_of_memory("send_deflated_token");
@@ -401,9 +402,10 @@ send_deflated_token(int f, int32 token, struct map_struct *buf, OFF_T offset,
 	if (token == -1) {
 		/* end of file - clean up */
 		write_byte(f, END_FLAG);
-	} else if (token != -2) {
+	} else if (token != -2 && do_compression == 1) {
 		/* Add the data in the current block to the compressor's
 		 * history and hash table. */
+#ifndef EXTERNAL_ZLIB
 		do {
 			/* Break up long sections in the same way that
 			 * see_deflate_token() does. */
@@ -411,6 +413,8 @@ send_deflated_token(int f, int32 token, struct map_struct *buf, OFF_T offset,
 			toklen -= n1;
 			tx_strm.next_in = (Bytef *)map_ptr(buf, offset, n1);
 			tx_strm.avail_in = n1;
+			if (protocol_version >= 31) /* Newer protocols avoid a data-duplicating bug */
+				offset += n1;
 			tx_strm.next_out = (Bytef *) obuf;
 			tx_strm.avail_out = AVAIL_OUT_SIZE(CHUNK_SIZE);
 			r = deflate(&tx_strm, Z_INSERT_ONLY);
@@ -420,6 +424,11 @@ send_deflated_token(int f, int32 token, struct map_struct *buf, OFF_T offset,
 				exit_cleanup(RERR_STREAMIO);
 			}
 		} while (toklen > 0);
+#else
+		toklen++;
+		rprintf(FERROR, "Impossible error in external-zlib code (1).\n");
+		exit_cleanup(RERR_STREAMIO);
+#endif
 	}
 }
 
@@ -452,7 +461,7 @@ static int32 recv_deflated_token(int f, char **data)
 				rx_strm.zfree = NULL;
 				if (inflateInit2(&rx_strm, -15) != Z_OK) {
 					rprintf(FERROR, "inflate init failed\n");
-					exit_cleanup(RERR_STREAMIO);
+					exit_cleanup(RERR_PROTOCOL);
 				}
 				if (!(cbuf = new_array(char, MAX_DATA_COUNT))
 				    || !(dbuf = new_array(char, AVAIL_OUT_SIZE(CHUNK_SIZE))))
@@ -570,6 +579,7 @@ static int32 recv_deflated_token(int f, char **data)
  */
 static void see_deflate_token(char *buf, int32 len)
 {
+#ifndef EXTERNAL_ZLIB
 	int r;
 	int32 blklen;
 	unsigned char hdr[5];
@@ -593,6 +603,8 @@ static void see_deflate_token(char *buf, int32 len)
 			} else {
 				rx_strm.next_in = (Bytef *)buf;
 				rx_strm.avail_in = blklen;
+				if (protocol_version >= 31) /* Newer protocols avoid a data-duplicating bug */
+					buf += blklen;
 				len -= blklen;
 				blklen = 0;
 			}
@@ -605,6 +617,11 @@ static void see_deflate_token(char *buf, int32 len)
 			exit_cleanup(RERR_STREAMIO);
 		}
 	} while (len || rx_strm.avail_out == 0);
+#else
+	buf++; len++;
+	rprintf(FERROR, "Impossible error in external-zlib code (2).\n");
+	exit_cleanup(RERR_STREAMIO);
+#endif
 }
 
 /**
@@ -644,6 +661,6 @@ int32 recv_token(int f, char **data)
  */
 void see_token(char *data, int32 toklen)
 {
-	if (do_compression)
+	if (do_compression == 1)
 		see_deflate_token(data, toklen);
 }

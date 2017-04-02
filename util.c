@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,19 +22,21 @@
 
 #include "rsync.h"
 #include "ifuncs.h"
+#include "itypes.h"
+#include "inums.h"
 
-extern int verbose;
+extern int dry_run;
 extern int module_id;
+extern int protect_args;
 extern int modify_window;
 extern int relative_paths;
 extern int preserve_times;
-extern int human_readable;
 extern int preserve_xattrs;
+extern int preallocate_files;
 extern char *module_dir;
 extern unsigned int module_dirlen;
-extern mode_t orig_umask;
 extern char *partial_dir;
-extern struct filter_list_struct daemon_filter_list;
+extern filter_rule_list daemon_filter_list;
 
 int sanitize_paths = 0;
 
@@ -94,6 +96,7 @@ int fd_pair(int fd[2])
 
 void print_child_argv(const char *prefix, char **cmd)
 {
+	int cnt = 0;
 	rprintf(FCLIENT, "%s ", prefix);
 	for (; *cmd; cmd++) {
 		/* Look for characters that ought to be quoted.  This
@@ -107,29 +110,18 @@ void print_child_argv(const char *prefix, char **cmd)
 		} else {
 			rprintf(FCLIENT, "%s ", *cmd);
 		}
+		cnt++;
 	}
-	rprintf(FCLIENT, "\n");
-}
-
-NORETURN void out_of_memory(const char *str)
-{
-	rprintf(FERROR, "ERROR: out of memory in %s [%s]\n", str, who_am_i());
-	exit_cleanup(RERR_MALLOC);
-}
-
-NORETURN void overflow_exit(const char *str)
-{
-	rprintf(FERROR, "ERROR: buffer overflow in %s [%s]\n", str, who_am_i());
-	exit_cleanup(RERR_MALLOC);
+	rprintf(FCLIENT, " (%d args)\n", cnt);
 }
 
 /* This returns 0 for success, 1 for a symlink if symlink time-setting
  * is not possible, or -1 for any other error. */
-int set_modtime(const char *fname, time_t modtime, mode_t mode)
+int set_modtime(const char *fname, time_t modtime, uint32 mod_nsec, mode_t mode)
 {
 	static int switch_step = 0;
 
-	if (verbose > 2) {
+	if (DEBUG_GTE(TIME, 1)) {
 		rprintf(FINFO, "set modtime of %s to (%ld) %s",
 			fname, (long)modtime,
 			asctime(localtime(&modtime)));
@@ -138,7 +130,7 @@ int set_modtime(const char *fname, time_t modtime, mode_t mode)
 	switch (switch_step) {
 #ifdef HAVE_UTIMENSAT
 #include "case_N.h"
-		if (do_utimensat(fname, modtime, 0) == 0)
+		if (do_utimensat(fname, modtime, mod_nsec) == 0)
 			break;
 		if (errno != ENOSYS)
 			return -1;
@@ -148,7 +140,7 @@ int set_modtime(const char *fname, time_t modtime, mode_t mode)
 
 #ifdef HAVE_LUTIMES
 #include "case_N.h"
-		if (do_lutimes(fname, modtime, 0) == 0)
+		if (do_lutimes(fname, modtime, mod_nsec) == 0)
 			break;
 		if (errno != ENOSYS)
 			return -1;
@@ -167,10 +159,10 @@ int set_modtime(const char *fname, time_t modtime, mode_t mode)
 
 #include "case_N.h"
 #ifdef HAVE_UTIMES
-		if (do_utimes(fname, modtime, 0) == 0)
+		if (do_utimes(fname, modtime, mod_nsec) == 0)
 			break;
 #else
-		if (do_utime(fname, modtime, 0) == 0)
+		if (do_utime(fname, modtime, mod_nsec) == 0)
 			break;
 #endif
 
@@ -180,41 +172,87 @@ int set_modtime(const char *fname, time_t modtime, mode_t mode)
 	return 0;
 }
 
-/* This creates a new directory with default permissions.  Since there
- * might be some directory-default permissions affecting this, we can't
- * force the permissions directly using the original umask and mkdir(). */
-int mkdir_defmode(char *fname)
-{
-	int ret;
-
-	umask(orig_umask);
-	ret = do_mkdir(fname, ACCESSPERMS);
-	umask(0);
-
-	return ret;
-}
-
 /* Create any necessary directories in fname.  Any missing directories are
- * created with default permissions. */
-int create_directory_path(char *fname)
+ * created with default permissions.  Returns < 0 on error, or the number
+ * of directories created. */
+int make_path(char *fname, int flags)
 {
-	char *p;
+	char *end, *p;
 	int ret = 0;
 
-	while (*fname == '/')
-		fname++;
-	while (strncmp(fname, "./", 2) == 0)
+	if (flags & MKP_SKIP_SLASH) {
+		while (*fname == '/')
+			fname++;
+	}
+
+	while (*fname == '.' && fname[1] == '/')
 		fname += 2;
 
-	umask(orig_umask);
-	p = fname;
-	while ((p = strchr(p,'/')) != NULL) {
-		*p = '\0';
-		if (do_mkdir(fname, ACCESSPERMS) < 0 && errno != EEXIST)
-		    ret = -1;
-		*p++ = '/';
+	if (flags & MKP_DROP_NAME) {
+		end = strrchr(fname, '/');
+		if (!end || end == fname)
+			return 0;
+		*end = '\0';
+	} else
+		end = fname + strlen(fname);
+
+	/* Try to find an existing dir, starting from the deepest dir. */
+	for (p = end; ; ) {
+		if (dry_run) {
+			STRUCT_STAT st;
+			if (do_stat(fname, &st) == 0) {
+				if (S_ISDIR(st.st_mode))
+					errno = EEXIST;
+				else
+					errno = ENOTDIR;
+			}
+		} else if (do_mkdir(fname, ACCESSPERMS) == 0) {
+			ret++;
+			break;
+		}
+
+		if (errno != ENOENT) {
+			STRUCT_STAT st;
+			if (errno != EEXIST || (do_stat(fname, &st) == 0 && !S_ISDIR(st.st_mode)))
+				ret = -ret - 1;
+			break;
+		}
+		while (1) {
+			if (p == fname) {
+				/* We got a relative path that doesn't exist, so assume that '.'
+				 * is there and just break out and create the whole thing. */
+				p = NULL;
+				goto double_break;
+			}
+			if (*--p == '/') {
+				if (p == fname) {
+					/* We reached the "/" dir, which we assume is there. */
+					goto double_break;
+				}
+				*p = '\0';
+				break;
+			}
+		}
 	}
-	umask(0);
+  double_break:
+
+	/* Make all the dirs that we didn't find on the way here. */
+	while (p != end) {
+		if (p)
+			*p = '/';
+		else
+			p = fname;
+		p += strlen(p);
+		if (ret < 0) /* Skip mkdir on error, but keep restoring the path. */
+			continue;
+		if (do_mkdir(fname, ACCESSPERMS) < 0)
+			ret = -ret - 1;
+		else
+			ret++;
+	}
+
+	if (flags & MKP_DROP_NAME)
+		*end = '/';
 
 	return ret;
 }
@@ -280,12 +318,14 @@ static int safe_read(int desc, char *ptr, size_t len)
  *
  * This is used in conjunction with the --temp-dir, --backup, and
  * --copy-dest options. */
-int copy_file(const char *source, const char *dest, int ofd,
-	      mode_t mode, int create_bak_dir)
+int copy_file(const char *source, const char *dest, int ofd, mode_t mode)
 {
 	int ifd;
 	char buf[1024 * 8];
 	int len;   /* Number of bytes read into `buf'. */
+#ifdef PREALLOCATE_NEEDS_TRUNCATE
+	OFF_T preallocated_len = 0, offset = 0;
+#endif
 
 	if ((ifd = do_open(source, O_RDONLY, 0)) < 0) {
 		int save_errno = errno;
@@ -302,22 +342,38 @@ int copy_file(const char *source, const char *dest, int ofd,
 			return -1;
 		}
 
+#ifdef SUPPORT_XATTRS
+		if (preserve_xattrs)
+			mode |= S_IWUSR;
+#endif
+		mode &= INITACCESSPERMS;
 		if ((ofd = do_open(dest, O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, mode)) < 0) {
-			int save_errno = errno ? errno : EINVAL; /* 0 paranoia */
-			if (create_bak_dir && errno == ENOENT && make_bak_dir(dest) == 0) {
-				if ((ofd = do_open(dest, O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, mode)) < 0)
-					save_errno = errno ? errno : save_errno;
-				else
-					save_errno = 0;
-			}
-			if (save_errno) {
-				rsyserr(FERROR_XFER, save_errno, "open %s", full_fname(dest));
-				bpc_close(ifd);
-				errno = save_errno;
-				return -1;
-			}
+			int save_errno = errno;
+			rsyserr(FERROR_XFER, save_errno, "open %s", full_fname(dest));
+			bpc_close(ifd);
+			errno = save_errno;
+			return -1;
 		}
 	}
+
+#ifdef SUPPORT_PREALLOCATION
+	if (preallocate_files) {
+		STRUCT_STAT srcst;
+
+		/* Try to preallocate enough space for file's eventual length.  Can
+		 * reduce fragmentation on filesystems like ext4, xfs, and NTFS. */
+		if (do_fstat(ifd, &srcst) < 0)
+			rsyserr(FWARNING, errno, "fstat %s", full_fname(source));
+		else if (srcst.st_size > 0) {
+			if (do_fallocate(ofd, 0, srcst.st_size) == 0) {
+#ifdef PREALLOCATE_NEEDS_TRUNCATE
+				preallocated_len = srcst.st_size;
+#endif
+			} else
+				rsyserr(FWARNING, errno, "do_fallocate %s", full_fname(dest));
+		}
+	}
+#endif
 
 	while ((len = safe_read(ifd, buf, sizeof buf)) > 0) {
 		if (full_write(ofd, buf, len) < 0) {
@@ -328,6 +384,9 @@ int copy_file(const char *source, const char *dest, int ofd,
 			errno = save_errno;
 			return -1;
 		}
+#ifdef PREALLOCATE_NEEDS_TRUNCATE
+		offset += len;
+#endif
 	}
 
 	if (len < 0) {
@@ -343,6 +402,16 @@ int copy_file(const char *source, const char *dest, int ofd,
 		rsyserr(FWARNING, errno, "close failed on %s",
 			full_fname(source));
 	}
+
+#ifdef PREALLOCATE_NEEDS_TRUNCATE
+	/* Source file might have shrunk since we fstatted it.
+	 * Cut off any extra preallocated zeros from dest file. */
+	if (offset < preallocated_len && do_ftruncate(ofd, offset) < 0) {
+		/* If we fail to truncate, the dest file may be wrong, so we
+		 * must trigger the "partial transfer" error. */
+		rsyserr(FERROR_XFER, errno, "ftruncate %s", full_fname(dest));
+	}
+#endif
 
 	if (bpc_close(ofd) < 0) {
 		int save_errno = errno;
@@ -407,7 +476,7 @@ int robust_unlink(const char *fname)
 			counter = 1;
 	} while ((rc = access(path, 0)) == 0 && counter != start);
 
-	if (verbose > 0) {
+	if (INFO_GTE(MISC, 1)) {
 		rprintf(FWARNING, "renaming %s to %s because of text busy\n",
 			fname, path);
 	}
@@ -450,7 +519,7 @@ int robust_rename(const char *from, const char *to, const char *partialptr,
 					return -2;
 				to = partialptr;
 			}
-			if (copy_file(from, to, -1, mode, 0) != 0)
+			if (copy_file(from, to, -1, mode) != 0)
 				return -2;
 			do_unlink(from);
 			return 1;
@@ -502,30 +571,6 @@ void kill_all(int sig)
 
 		kill(p, sig);
 	}
-}
-
-/** Turn a user name into a uid */
-int name_to_uid(const char *name, uid_t *uid_p)
-{
-	struct passwd *pass;
-	if (!name || !*name)
-		return 0;
-	if (!(pass = getpwnam(name)))
-		return 0;
-	*uid_p = pass->pw_uid;
-	return 1;
-}
-
-/** Turn a group name into a gid */
-int name_to_gid(const char *name, gid_t *gid_p)
-{
-	struct group *grp;
-	if (!name || !*name)
-		return 0;
-	if (!(grp = getgrnam(name)))
-		return 0;
-	*gid_p = grp->gr_gid;
-	return 1;
 }
 
 /** Lock a byte range in a open file */
@@ -719,10 +764,15 @@ void glob_expand_module(char *base1, char *arg, char ***argv_p, int *argc_p, int
 	if (strncmp(arg, base, base_len) == 0)
 		arg += base_len;
 
+	if (protect_args) {
+		glob_expand(arg, argv_p, argc_p, maxargs_p);
+		return;
+	}
+
 	if (!(arg = strdup(arg)))
 		out_of_memory("glob_expand_module");
 
-	if (asprintf(&base," %s/", base1) <= 0)
+	if (asprintf(&base," %s/", base1) < 0)
 		out_of_memory("glob_expand_module");
 	base_len++;
 
@@ -824,13 +874,15 @@ int count_dir_elements(const char *p)
  * CFN_KEEP_TRAILING_SLASH is flagged, and will also collapse ".." elements
  * (except at the start) if CFN_COLLAPSE_DOT_DOT_DIRS is flagged.  If the
  * resulting name would be empty, returns ".". */
-unsigned int clean_fname(char *name, int flags)
+int clean_fname(char *name, int flags)
 {
 	char *limit = name - 1, *t = name, *f = name;
 	int anchored;
 
 	if (!name)
 		return 0;
+
+#define DOT_IS_DOT_DOT_DIR(bp) (bp[1] == '.' && (bp[2] == '/' || !bp[2]))
 
 	if ((anchored = *f == '/') != 0) {
 		*t++ = *f++;
@@ -844,7 +896,8 @@ unsigned int clean_fname(char *name, int flags)
 	} else if (flags & CFN_KEEP_DOT_DIRS && *f == '.' && f[1] == '/') {
 		*t++ = *f++;
 		*t++ = *f++;
-	}
+	} else if (flags & CFN_REFUSE_DOT_DOT_DIRS && *f == '.' && DOT_IS_DOT_DOT_DIR(f))
+		return -1;
 	while (*f) {
 		/* discard extra slashes */
 		if (*f == '/') {
@@ -860,9 +913,10 @@ unsigned int clean_fname(char *name, int flags)
 			if (f[1] == '\0' && flags & CFN_DROP_TRAILING_DOT_DIR)
 				break;
 			/* collapse ".." dirs */
-			if (flags & CFN_COLLAPSE_DOT_DOT_DIRS
-			 && f[1] == '.' && (f[2] == '/' || !f[2])) {
+			if (flags & (CFN_COLLAPSE_DOT_DOT_DIRS|CFN_REFUSE_DOT_DOT_DIRS) && DOT_IS_DOT_DOT_DIR(f)) {
 				char *s = t - 1;
+				if (flags & CFN_REFUSE_DOT_DOT_DIRS)
+					return -1;
 				if (s == name && anchored) {
 					f += 2;
 					continue;
@@ -884,6 +938,8 @@ unsigned int clean_fname(char *name, int flags)
 	if (t == name)
 		*t++ = '.';
 	*t = '\0';
+
+#undef DOT_IS_DOT_DOT_DIR
 
 	return t - name;
 }
@@ -992,7 +1048,7 @@ char *sanitize_path(char *dest, const char *p, const char *rootdir, int depth,
  * Also cleans the path using the clean_fname() function. */
 int change_dir(const char *dir, int set_path_only)
 {
-	static int initialised;
+	static int initialised, skipped_chdir;
 	unsigned int len;
 
 	if (!initialised) {
@@ -1005,7 +1061,7 @@ int change_dir(const char *dir, int set_path_only)
 		return 0;
 
 	len = strlen(dir);
-	if (len == 1 && *dir == '.')
+	if (len == 1 && *dir == '.' && (!skipped_chdir || set_path_only))
 		return 1;
 
 	if (*dir == '/') {
@@ -1015,6 +1071,7 @@ int change_dir(const char *dir, int set_path_only)
 		}
 		if (!set_path_only && bpc_chdir(dir))
 			return 0;
+		skipped_chdir = set_path_only;
 		memcpy(curr_dir, dir, len + 1);
 	} else {
 		if (curr_dir_len + 1 + len >= sizeof curr_dir) {
@@ -1029,16 +1086,17 @@ int change_dir(const char *dir, int set_path_only)
 			curr_dir[curr_dir_len] = '\0';
 			return 0;
 		}
+		skipped_chdir = set_path_only;
 	}
 
-	curr_dir_len = clean_fname(curr_dir, CFN_COLLAPSE_DOT_DOT_DIRS);
+	curr_dir_len = clean_fname(curr_dir, CFN_COLLAPSE_DOT_DOT_DIRS | CFN_DROP_TRAILING_DOT_DIR);
 	if (sanitize_paths) {
 		if (module_dirlen > curr_dir_len)
 			module_dirlen = curr_dir_len;
 		curr_dir_depth = count_dir_elements(curr_dir + module_dirlen);
 	}
 
-	if (verbose >= 5 && !set_path_only)
+	if (DEBUG_GTE(CHDIR, 1) && !set_path_only)
 		rprintf(FINFO, "[%s] change_dir(%s)\n", who_am_i(), curr_dir);
 
 	return 1;
@@ -1101,7 +1159,7 @@ char *full_fname(const char *fn)
 	} else
 		m1 = m2 = m3 = "";
 
-	if (asprintf(&result, "\"%s%s%s\"%s%s%s", p1, p2, fn, m1, m2, m3) <= 0)
+	if (asprintf(&result, "\"%s%s%s\"%s%s%s", p1, p2, fn, m1, m2, m3) < 0)
 		out_of_memory("full_fname");
 
 	return result;
@@ -1235,87 +1293,6 @@ int unsafe_symlink(const char *dest, const char *src)
 	return depth < 0;
 }
 
-#define HUMANIFY(mult) \
-	do { \
-		if (num >= mult || num <= -mult) { \
-			double dnum = (double)num / mult; \
-			char units; \
-			if (num < 0) \
-				dnum = -dnum; \
-			if (dnum < mult) \
-				units = 'K'; \
-			else if ((dnum /= mult) < mult) \
-				units = 'M'; \
-			else { \
-				dnum /= mult; \
-				units = 'G'; \
-			} \
-			if (num < 0) \
-				dnum = -dnum; \
-			snprintf(bufs[n], sizeof bufs[0], "%.2f%c", dnum, units); \
-			return bufs[n]; \
-		} \
-	} while (0)
-
-/* Return the int64 number as a string.  If the --human-readable option was
- * specified, we may output the number in K, M, or G units.  We can return
- * up to 4 buffers at a time. */
-char *human_num(int64 num)
-{
-	static char bufs[4][128]; /* more than enough room */
-	static unsigned int n;
-	char *s;
-	int negated;
-
-	n = (n + 1) % (sizeof bufs / sizeof bufs[0]);
-
-	if (human_readable) {
-		if (human_readable == 1)
-			HUMANIFY(1000);
-		else
-			HUMANIFY(1024);
-	}
-
-	s = bufs[n] + sizeof bufs[0] - 1;
-	*s = '\0';
-
-	if (!num)
-		*--s = '0';
-	if (num < 0) {
-		/* A maximum-size negated number can't fit as a positive,
-		 * so do one digit in negated form to start us off. */
-		*--s = (char)(-(num % 10)) + '0';
-		num = -(num / 10);
-		negated = 1;
-	} else
-		negated = 0;
-
-	while (num) {
-		*--s = (char)(num % 10) + '0';
-		num /= 10;
-	}
-
-	if (negated)
-		*--s = '-';
-
-	return s;
-}
-
-/* Return the double number as a string.  If the --human-readable option was
- * specified, we may output the number in K, M, or G units.  We use a buffer
- * from human_num() to return our result. */
-char *human_dnum(double dnum, int decimal_digits)
-{
-	char *buf = human_num(dnum);
-	int len = strlen(buf);
-	if (isDigit(buf + len - 1)) {
-		/* There's extra room in buf prior to the start of the num. */
-		buf -= decimal_digits + 2;
-		snprintf(buf, len + decimal_digits + 3, "%.*f", decimal_digits, dnum);
-	}
-	return buf;
-}
-
 /* Return the date and time as a string.  Some callers tweak returned buf. */
 char *timestring(time_t t)
 {
@@ -1335,34 +1312,6 @@ char *timestring(time_t t)
 	return TimeBuf;
 }
 
-/**
- * Sleep for a specified number of milliseconds.
- *
- * Always returns TRUE.  (In the future it might return FALSE if
- * interrupted.)
- **/
-int msleep(int t)
-{
-	int tdiff = 0;
-	struct timeval tval, t1, t2;
-
-	gettimeofday(&t1, NULL);
-
-	while (tdiff < t) {
-		tval.tv_sec = (t-tdiff)/1000;
-		tval.tv_usec = 1000*((t-tdiff)%1000);
-
-		errno = 0;
-		select(0,NULL,NULL, NULL, &tval);
-
-		gettimeofday(&t2, NULL);
-		tdiff = (t2.tv_sec - t1.tv_sec)*1000 +
-			(t2.tv_usec - t1.tv_usec)/1000;
-	}
-
-	return True;
-}
-
 /* Determine if two time_t values are equivalent (either exact, or in
  * the modification timestamp window established by --modify-window).
  *
@@ -1375,15 +1324,16 @@ int msleep(int t)
 int cmp_time(time_t file1, time_t file2)
 {
 	if (file2 > file1) {
-		if (file2 - file1 <= modify_window)
-			return 0;
-		return -1;
+		/* The final comparison makes sure that modify_window doesn't overflow a
+		 * time_t, which would mean that file2 must be in the equality window. */
+		if (!modify_window || (file2 > file1 + modify_window && file1 + modify_window > file1))
+			return -1;
+	} else if (file1 > file2) {
+		if (!modify_window || (file1 > file2 + modify_window && file2 + modify_window > file2))
+			return 1;
 	}
-	if (file1 - file2 <= modify_window)
-		return 0;
-	return 1;
+	return 0;
 }
-
 
 #ifdef __INSURE__XX
 #include <dlfcn.h>
@@ -1396,11 +1346,13 @@ int cmp_time(time_t file1, time_t file2)
 int _Insure_trap_error(int a1, int a2, int a3, int a4, int a5, int a6)
 {
 	static int (*fn)();
-	int ret;
+	int ret, pid_int = getpid();
 	char *cmd;
 
-	asprintf(&cmd, "/usr/X11R6/bin/xterm -display :0 -T Panic -n Panic -e /bin/sh -c 'cat /tmp/ierrs.*.%d ; gdb /proc/%d/exe %d'",
-		getpid(), getpid(), getpid());
+	if (asprintf(&cmd,
+	    "/usr/X11R6/bin/xterm -display :0 -T Panic -n Panic -e /bin/sh -c 'cat /tmp/ierrs.*.%d ; "
+	    "gdb /proc/%d/exe %d'", pid_int, pid_int, pid_int) < 0)
+		return -1;
 
 	if (!fn) {
 		static void *h;
@@ -1417,24 +1369,6 @@ int _Insure_trap_error(int a1, int a2, int a3, int a4, int a5, int a6)
 	return ret;
 }
 #endif
-
-#define MALLOC_MAX 0x40000000
-
-void *_new_array(unsigned long num, unsigned int size, int use_calloc)
-{
-	if (num >= MALLOC_MAX/size)
-		return NULL;
-	return use_calloc ? calloc(num, size) : malloc(num * size);
-}
-
-void *_realloc_array(void *ptr, unsigned int size, size_t num)
-{
-	if (num >= MALLOC_MAX/size)
-		return NULL;
-	if (!ptr)
-		return malloc(size * num);
-	return realloc(ptr, size * num);
-}
 
 /* Take a filename and filename length and return the most significant
  * filename suffix we can find.  This ignores suffixes such as "~",
@@ -1500,11 +1434,11 @@ const char *find_filename_suffix(const char *fn, int fn_len, int *len_ptr)
 
 #define UNIT (1 << 16)
 
-uint32 fuzzy_distance(const char *s1, int len1, const char *s2, int len2)
+uint32 fuzzy_distance(const char *s1, unsigned len1, const char *s2, unsigned len2)
 {
 	uint32 a[MAXPATHLEN], diag, above, left, diag_inc, above_inc, left_inc;
 	int32 cost;
-	int i1, i2;
+	unsigned i1, i2;
 
 	if (!len1 || !len2) {
 		if (!len1) {
@@ -1668,6 +1602,14 @@ int flist_ndx_pop(flist_ndx_list *lp)
 	return ndx;
 }
 
+/* Make sure there is room for one more item in the item list.  If there
+ * is not, expand the list as indicated by the value of "incr":
+ *  - if incr < 0 then increase the malloced size by -1 * incr
+ *  - if incr >= 0 then either make the malloced size equal to "incr"
+ *    or (if that's not large enough) double the malloced size
+ * After the size check, the list's count is incremented by 1 and a pointer
+ * to the "new" list item is returned.
+ */
 void *expand_item_list(item_list *lp, size_t item_size,
 		       const char *desc, int incr)
 {
@@ -1678,16 +1620,18 @@ void *expand_item_list(item_list *lp, size_t item_size,
 		if (incr < 0)
 			new_size += -incr; /* increase slowly */
 		else if (new_size < (size_t)incr)
-			new_size += incr;
-		else
+			new_size = incr;
+		else if (new_size)
 			new_size *= 2;
-		if (new_size < lp->malloced)
+		else
+			new_size = 1;
+		if (new_size <= lp->malloced)
 			overflow_exit("expand_item_list");
 		/* Using _realloc_array() lets us pass the size, not a type. */
 		new_ptr = _realloc_array(lp->items, item_size, new_size);
-		if (verbose >= 4) {
-			rprintf(FINFO, "[%s] expand %s to %.0f bytes, did%s move\n",
-				who_am_i(), desc, (double)new_size * item_size,
+		if (DEBUG_GTE(FLIST, 3)) {
+			rprintf(FINFO, "[%s] expand %s to %s bytes, did%s move\n",
+				who_am_i(), desc, big_num(new_size * item_size),
 				new_ptr == lp->items ? " not" : "");
 		}
 		if (!new_ptr)

@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1999 Weiss
  * Copyright (C) 2004 Chris Shoemaker
- * Copyright (C) 2004-2009 Wayne Davison
+ * Copyright (C) 2004-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,7 +20,7 @@
  */
 
 #include "rsync.h"
-#include "zlib/zlib.h"
+#include <zlib.h>
 #include <time.h>
 
 extern int eol_nulls;
@@ -43,7 +43,7 @@ extern char *batch_name;
 extern char *iconv_opt;
 #endif
 
-extern struct filter_list_struct filter_list;
+extern filter_rule_list filter_list;
 
 int batch_stream_flags;
 
@@ -135,7 +135,7 @@ void check_batch_flags(void)
 					set ? "Please" : "Do not");
 				exit_cleanup(RERR_SYNTAX);
 			}
-			if (verbose) {
+			if (INFO_GTE(MISC, 1)) {
 				rprintf(FINFO,
 					"%sing the %s option to match the batchfile.\n",
 					set ? "Sett" : "Clear", flag_name[i]);
@@ -191,15 +191,15 @@ static int write_arg(int fd, char *arg)
 
 static void write_filter_rules(int fd)
 {
-	struct filter_struct *ent;
+	filter_rule *ent;
 
 	write_sbuf(fd, " <<'#E#'\n");
 	for (ent = filter_list.head; ent; ent = ent->next) {
 		unsigned int plen;
-		char *p = get_rule_prefix(ent->match_flags, "- ", 0, &plen);
+		char *p = get_rule_prefix(ent, "- ", 0, &plen);
 		write_buf(fd, p, plen);
 		write_sbuf(fd, ent->pattern);
-		if (ent->match_flags & MATCHFLG_DIRECTORY)
+		if (ent->rflags & FILTRULE_DIRECTORY)
 			write_byte(fd, '/');
 		write_byte(fd, eol_nulls ? 0 : '\n');
 	}
@@ -221,7 +221,7 @@ void write_batch_shell_file(int argc, char *argv[], int file_arg_cnt)
 	stringjoin(filename, sizeof filename,
 		   batch_name, ".sh", NULL);
 	fd = do_open(filename, O_WRONLY | O_CREAT | O_TRUNC,
-		     S_IRUSR | S_IWUSR | S_IEXEC);
+		     S_IRUSR | S_IWUSR | S_IXUSR);
 	if (fd < 0) {
 		rsyserr(FERROR, errno, "Batch file %s open error",
 			filename);

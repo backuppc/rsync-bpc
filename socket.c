@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1992-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@
  * emulate it using the KAME implementation. */
 
 #include "rsync.h"
-#include "ifuncs.h"
+#include "itypes.h"
 #ifdef HAVE_NETINET_IN_SYSTM_H
 #include <netinet/in_systm.h>
 #endif
@@ -161,7 +161,7 @@ int try_bind_local(int s, int ai_family, int ai_socktype,
 }
 
 /* connect() timeout handler based on alarm() */
-static RETSIGTYPE contimeout_handler(UNUSED(int val))
+static void contimeout_handler(UNUSED(int val))
 {
 	connect_timeout = -1;
 }
@@ -229,7 +229,7 @@ int open_socket_out(char *host, int port, const char *bind_addr,
 		}
 		*cp++ = '\0';
 		strlcpy(portbuf, cp, sizeof portbuf);
-		if (verbose >= 2) {
+		if (DEBUG_GTE(CONNECT, 1)) {
 			rprintf(FINFO, "connection via http proxy %s port %s\n",
 				h, portbuf);
 		}
@@ -301,7 +301,7 @@ int open_socket_out(char *host, int port, const char *bind_addr,
 			s = -1;
 			continue;
 		}
-		if (verbose >= 3) {
+		if (DEBUG_GTE(CONNECT, 2)) {
 			char buf[2048];
 			if ((error = getnameinfo(res->ai_addr, res->ai_addrlen, buf, sizeof buf, NULL, 0, NI_NUMERICHOST)) != 0)
 				snprintf(buf, sizeof buf, "*getnameinfo failure: %s*", gai_strerror(error));
@@ -310,7 +310,7 @@ int open_socket_out(char *host, int port, const char *bind_addr,
 		break;
 	}
 
-	if (s < 0 || verbose >= 3) {
+	if (s < 0 || DEBUG_GTE(CONNECT, 2)) {
 		char buf[2048];
 		for (res = res0, j = 0; res; res = res->ai_next, j++) {
 			if (errnos[j] == 0)
@@ -381,7 +381,7 @@ int open_socket_out_wrapped(char *host, int port, const char *bind_addr,
 		*t = '\0';
 	}
 
-	if (verbose >= 2) {
+	if (DEBUG_GTE(CONNECT, 1)) {
 		rprintf(FINFO, "%sopening tcp connection to %s port %d\n",
 			prog ? "Using RSYNC_CONNECT_PROG instead of " : "",
 			host, port);
@@ -489,7 +489,7 @@ static int *open_socket_in(int type, int port, const char *bind_addr,
 	/* Only output the socket()/bind() messages if we were totally
 	 * unsuccessful, or if the daemon is being run with -vv. */
 	for (s = 0; s < ecnt; s++) {
-		if (!i || verbose > 1)
+		if (!i || DEBUG_GTE(BIND, 1))
 			rwrite(FLOG, errmsgs[s], strlen(errmsgs[s]), 0);
 		free(errmsgs[s]);
 	}
@@ -529,7 +529,7 @@ int is_a_socket(int fd)
 }
 
 
-static RETSIGTYPE sigchld_handler(UNUSED(int val))
+static void sigchld_handler(UNUSED(int val))
 {
 #ifdef WNOHANG
 	while (waitpid(-1, NULL, WNOHANG) > 0) {}
@@ -557,7 +557,7 @@ void start_accept_loop(int port, int (*fn)(int, int))
 	/* ready to listen */
 	FD_ZERO(&deffds);
 	for (i = 0, maxfd = -1; sp[i] >= 0; i++) {
-		if (listen(sp[i], 5) < 0) {
+		if (listen(sp[i], lp_listen_backlog()) < 0) {
 			rsyserr(FERROR, errno, "listen() on socket failed");
 #ifdef INET6
 			if (errno == EADDRINUSE && i > 0) {
@@ -831,7 +831,7 @@ static int sock_exec(const char *prog)
 		rsyserr(FERROR, errno, "socketpair_tcp failed");
 		return -1;
 	}
-	if (verbose >= 2)
+	if (DEBUG_GTE(CMD, 1))
 		rprintf(FINFO, "Running socket program: \"%s\"\n", prog);
 
 	pid = fork();

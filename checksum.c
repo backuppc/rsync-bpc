@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2004-2009 Wayne Davison
+ * Copyright (C) 2004-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,6 +23,7 @@
 
 extern int checksum_seed;
 extern int protocol_version;
+extern int proper_seed_order;
 
 /*
   a simple 32 bit checksum that can be upadted from either end
@@ -54,10 +55,18 @@ void get_checksum2(char *buf, int32 len, char *sum)
 	if (protocol_version >= 30) {
 		uchar seedbuf[4];
 		md5_begin(&m);
-		md5_update(&m, (uchar *)buf, len);
-		if (checksum_seed) {
-			SIVALu(seedbuf, 0, checksum_seed);
-			md5_update(&m, seedbuf, 4);
+		if (proper_seed_order) {
+			if (checksum_seed) {
+				SIVALu(seedbuf, 0, checksum_seed);
+				md5_update(&m, seedbuf, 4);
+			}
+			md5_update(&m, (uchar *)buf, len);
+		} else {
+			md5_update(&m, (uchar *)buf, len);
+			if (checksum_seed) {
+				SIVALu(seedbuf, 0, checksum_seed);
+				md5_update(&m, seedbuf, 4);
+			}
 		}
 		md5_result(&m, (uchar *)sum);
 	} else {
@@ -98,10 +107,10 @@ void get_checksum2(char *buf, int32 len, char *sum)
 	}
 }
 
-int file_checksum(char *fname, char *sum, OFF_T size)
+int file_checksum(const char *fname, const STRUCT_STAT *st_p, char *sum)
 {
 	struct map_struct *buf;
-	OFF_T i, len = size;
+	OFF_T i, len = st_p->st_size;
 	md_context m;
 	int32 remainder;
 	int fd;
@@ -113,20 +122,20 @@ int file_checksum(char *fname, char *sum, OFF_T size)
          * Otherwise fall through and do it the slow way.
          */
         if ( protocol_version >= 30 ) {
-            if ( !bpc_file_checksum(fname, sum, MD5_DIGEST_LEN) ) return 0;
+            if ( !bpc_file_checksum((char *)fname, sum, MD5_DIGEST_LEN) ) return 0;
             /*
              * if bpc_file_checksum() fails on an empty file it likely means we have a wrong
              * digest, so don't recompute; this will cause the file to get re-transfered and
              * the digest will be updated.
              */
-            if ( size == 0 ) return -1;
+            if ( len == 0 ) return -1;
         }
 
 	fd = do_open(fname, O_RDONLY, 0);
 	if (fd == -1)
 		return -1;
 
-	buf = map_file(fd, size, MAX_MAP_SIZE, CSUM_CHUNK);
+	buf = map_file(fd, len, MAX_MAP_SIZE, CSUM_CHUNK);
 
 	if (protocol_version >= 30) {
 		md5_begin(&m);

@@ -15,11 +15,21 @@ use constant RSYNC => '/usr/bin/rsync';
 use constant LOGFILE => 'rrsync.log';
 
 my $Usage = <<EOM;
-Use 'command="$0 [-ro] SUBDIR"'
+Use 'command="$0 [-ro|-wo] SUBDIR"'
 	in front of lines in $ENV{HOME}/.ssh/authorized_keys
 EOM
 
-our $ro = (@ARGV && $ARGV[0] eq '-ro') ? shift : '';	# -ro = Read-Only
+# Handle the -ro and -wo options.
+our $only = '';
+while (@ARGV && $ARGV[0] =~ /^-([rw])o$/) {
+    my $r_or_w = $1;
+    if ($only && $only ne $r_or_w) {
+	die "$0: the -ro and -wo options conflict.\n";
+    }
+    $only = $r_or_w;
+    shift;
+}
+
 our $subdir = shift;
 die "$0: No subdirectory specified\n$Usage" unless defined $subdir;
 $subdir = abs_path($subdir);
@@ -31,7 +41,7 @@ die "$0: Restricted directory does not exist!\n" if $subdir ne '/' && !-d $subdi
 # command="rrsync logs/client" ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAIEAzGhEeNlPr...
 # command="rrsync -ro results" ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAIEAmkHG1WCjC...
 #
-# Format of the envrionment variables set by sshd:
+# Format of the environment variables set by sshd:
 # SSH_ORIGINAL_COMMAND=rsync --server          -vlogDtpr --partial . ARG # push
 # SSH_ORIGINAL_COMMAND=rsync --server --sender -vlogDtpr --partial . ARGS # pull
 # SSH_CONNECTION=client_addr client_port server_port
@@ -41,7 +51,8 @@ die "$0: Not invoked via sshd\n$Usage"	unless defined $command;
 die "$0: SSH_ORIGINAL_COMMAND='$command' is not rsync\n" unless $command =~ s/^rsync\s+//;
 die "$0: --server option is not first\n" unless $command =~ /^--server\s/;
 our $am_sender = $command =~ /^--server\s+--sender\s/; # Restrictive on purpose!
-die "$0 -ro: sending to read-only server not allowed\n" if $ro && !$am_sender;
+die "$0 sending to read-only server not allowed\n" if $only eq 'r' && !$am_sender;
+die "$0 reading from write-only server not allowed\n" if $only eq 'w' && $am_sender;
 
 ### START of options data produced by the cull_options script. ###
 
@@ -51,7 +62,7 @@ die "$0 -ro: sending to read-only server not allowed\n" if $ro && !$am_sender;
 # To disable a short-named option, add its letter to this string:
 our $short_disabled = 's';
 
-our $short_no_arg = 'ACDEHIKLORSWXbcdgklmnoprstuvxz'; # DO NOT REMOVE ANY
+our $short_no_arg = 'ACDEHIJKLORSWXbcdgklmnoprstuvxyz'; # DO NOT REMOVE ANY
 our $short_with_num = 'B'; # DO NOT REMOVE ANY
 
 # To disable a long-named option, change its value to a -1.  The values mean:
@@ -60,6 +71,7 @@ our $short_with_num = 'B'; # DO NOT REMOVE ANY
 our %long_opt = (
   'append' => 0,
   'backup-dir' => 2,
+  'block-size' => 1,
   'bwlimit' => 1,
   'checksum-seed' => 1,
   'compare-dest' => 2,
@@ -67,6 +79,7 @@ our %long_opt = (
   'copy-dest' => 2,
   'copy-unsafe-links' => 0,
   'daemon' => -1,
+  'debug' => 1,
   'delay-updates' => 0,
   'delete' => 0,
   'delete-after' => 0,
@@ -74,17 +87,25 @@ our %long_opt = (
   'delete-delay' => 0,
   'delete-during' => 0,
   'delete-excluded' => 0,
+  'delete-missing-args' => 0,
   'existing' => 0,
   'fake-super' => 0,
   'files-from' => 3,
   'force' => 0,
   'from0' => 0,
   'fuzzy' => 0,
+  'group' => 0,
+  'groupmap' => 1,
+  'hard-links' => 0,
   'iconv' => 1,
   'ignore-errors' => 0,
   'ignore-existing' => 0,
+  'ignore-missing-args' => 0,
+  'ignore-times' => 0,
+  'info' => 1,
   'inplace' => 0,
   'link-dest' => 2,
+  'links' => 0,
   'list-only' => 0,
   'log-file' => 3,
   'log-format' => 1,
@@ -92,16 +113,22 @@ our %long_opt = (
   'max-size' => 1,
   'min-size' => 1,
   'modify-window' => 1,
+  'new-compress' => 0,
   'no-implied-dirs' => 0,
   'no-r' => 0,
   'no-relative' => 0,
   'no-specials' => 0,
   'numeric-ids' => 0,
+  'one-file-system' => 0,
   'only-write-batch' => 1,
+  'owner' => 0,
   'partial' => 0,
   'partial-dir' => 2,
-  'remove-sent-files' => $ro ? -1 : 0,
-  'remove-source-files' => $ro ? -1 : 0,
+  'perms' => 0,
+  'preallocate' => 0,
+  'recursive' => 0,
+  'remove-sent-files' => $only eq 'r' ? -1 : 0,
+  'remove-source-files' => $only eq 'r' ? -1 : 0,
   'safe-links' => 0,
   'sender' => 0,
   'server' => 0,
@@ -113,7 +140,9 @@ our %long_opt = (
   'super' => 0,
   'temp-dir' => 2,
   'timeout' => 1,
+  'times' => 0,
   'use-qsort' => 0,
+  'usermap' => 1,
 );
 
 ### END of options data produced by the cull_options script. ###

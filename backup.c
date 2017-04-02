@@ -2,7 +2,7 @@
  * Backup handling code.
  *
  * Copyright (C) 1999 Andrew Tridgell
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,8 +19,8 @@
  */
 
 #include "rsync.h"
+#include "ifuncs.h"
 
-extern int verbose;
 extern int am_root;
 extern int preserve_acls;
 extern int preserve_xattrs;
@@ -34,203 +34,230 @@ extern char backup_dir_buf[MAXPATHLEN];
 extern char *backup_suffix;
 extern char *backup_dir;
 
-/* make a complete pathname for backup file */
+/* Returns -1 on error, 0 on missing dir, and 1 on present dir. */
+static int validate_backup_dir(void)
+{
+	STRUCT_STAT st;
+
+	if (do_lstat(backup_dir_buf, &st) < 0) {
+		if (errno == ENOENT)
+			return 0;
+		rsyserr(FERROR, errno, "backup lstat %s failed", backup_dir_buf);
+		return -1;
+	}
+	if (!S_ISDIR(st.st_mode)) {
+		int flags = get_del_for_flag(st.st_mode) | DEL_FOR_BACKUP | DEL_RECURSE;
+		if (delete_item(backup_dir_buf, st.st_mode, flags) == 0)
+			return 0;
+		return -1;
+	}
+	return 1;
+}
+
+/* Create a backup path from the given fname, putting the result into
+ * backup_dir_buf.  Any new directories (compared to the prior backup
+ * path) are ensured to exist as directories, replacing anything else
+ * that may be in the way (e.g. a symlink). */
+static BOOL copy_valid_path(const char *fname)
+{
+	const char *f;
+	int val;
+	BOOL ret = True;
+	stat_x sx;
+	char *b, *rel = backup_dir_buf + backup_dir_len, *name = rel;
+
+	for (f = fname, b = rel; *f && *f == *b; f++, b++) {
+		if (*b == '/')
+			name = b + 1;
+	}
+
+	if (stringjoin(rel, backup_dir_remainder, fname, backup_suffix, NULL) >= backup_dir_remainder) {
+		rprintf(FERROR, "backup filename too long\n");
+		*name = '\0';
+		return False;
+	}
+
+	for ( ; ; name = b + 1) {
+		if ((b = strchr(name, '/')) == NULL)
+			return True;
+		*b = '\0';
+
+		val = validate_backup_dir();
+		if (val == 0)
+			break;
+		if (val < 0) {
+			*name = '\0';
+			return False;
+		}
+
+		*b = '/';
+	}
+
+	init_stat_x(&sx);
+
+	for ( ; b; name = b + 1, b = strchr(name, '/')) {
+		*b = '\0';
+
+		while (do_mkdir(backup_dir_buf, ACCESSPERMS) < 0) {
+			if (errno == EEXIST) {
+				val = validate_backup_dir();
+				if (val > 0)
+					break;
+				if (val == 0)
+					continue;
+			} else
+				rsyserr(FERROR, errno, "backup mkdir %s failed", backup_dir_buf);
+			*name = '\0';
+			ret = False;
+			goto cleanup;
+		}
+
+		/* Try to transfer the directory settings of the actual dir
+		 * that the files are coming from. */
+		if (x_stat(rel, &sx.st, NULL) < 0)
+			rsyserr(FERROR, errno, "backup stat %s failed", full_fname(rel));
+		else {
+			struct file_struct *file;
+			if (!(file = make_file(rel, NULL, NULL, 0, NO_FILTERS)))
+				continue;
+#ifdef SUPPORT_ACLS
+			if (preserve_acls && !S_ISLNK(file->mode)) {
+				get_acl(rel, &sx);
+				cache_tmp_acl(file, &sx);
+				free_acl(&sx);
+			}
+#endif
+#ifdef SUPPORT_XATTRS
+			if (preserve_xattrs) {
+				get_xattr(rel, &sx);
+				cache_tmp_xattr(file, &sx);
+				free_xattr(&sx);
+			}
+#endif
+			set_file_attrs(backup_dir_buf, file, NULL, NULL, 0);
+			unmake_file(file);
+		}
+
+		*b = '/';
+	}
+
+  cleanup:
+
+#ifdef SUPPORT_ACLS
+	uncache_tmp_acls();
+#endif
+#ifdef SUPPORT_XATTRS
+	uncache_tmp_xattrs();
+#endif
+
+	return ret;
+}
+
+/* Make a complete pathname for backup file and verify any new path elements. */
 char *get_backup_name(const char *fname)
 {
 	if (backup_dir) {
-		if (stringjoin(backup_dir_buf + backup_dir_len, backup_dir_remainder,
-			       fname, backup_suffix, NULL) < backup_dir_remainder)
+		static int initialized = 0;
+		if (!initialized) {
+			int ret;
+			if (backup_dir_len > 1)
+				backup_dir_buf[backup_dir_len-1] = '\0';
+			ret = make_path(backup_dir_buf, 0);
+			if (backup_dir_len > 1)
+				backup_dir_buf[backup_dir_len-1] = '/';
+			if (ret < 0)
+				return NULL;
+			initialized = 1;
+		}
+		/* copy fname into backup_dir_buf while validating the dirs. */
+		if (copy_valid_path(fname))
 			return backup_dir_buf;
-	} else {
-		if (stringjoin(backup_dir_buf, MAXPATHLEN,
-			       fname, backup_suffix, NULL) < MAXPATHLEN)
-			return backup_dir_buf;
+		/* copy_valid_path() has printed an error message. */
+		return NULL;
 	}
+
+	if (stringjoin(backup_dir_buf, MAXPATHLEN, fname, backup_suffix, NULL) < MAXPATHLEN)
+		return backup_dir_buf;
 
 	rprintf(FERROR, "backup filename too long\n");
 	return NULL;
 }
 
-/* simple backup creates a backup with a suffix in the same directory */
-static int make_simple_backup(const char *fname)
+/* Has same return codes as make_backup(). */
+static inline int link_or_rename(const char *from, const char *to,
+				 BOOL prefer_rename, STRUCT_STAT *stp)
 {
-	int rename_errno;
-	const char *fnamebak = get_backup_name(fname);
-
-	if (!fnamebak)
-		return 0;
-
-	while (1) {
-		if (do_rename(fname, fnamebak) == 0) {
-			if (verbose > 1) {
-				rprintf(FINFO, "backed up %s to %s\n",
-					fname, fnamebak);
-			}
-			break;
-		}
-		/* cygwin (at least version b19) reports EINVAL */
-		if (errno == ENOENT || errno == EINVAL)
-			break;
-
-		rename_errno = errno;
-		if (errno == EISDIR && do_rmdir(fnamebak) == 0)
-			continue;
-		if (errno == ENOTDIR && do_unlink(fnamebak) == 0)
-			continue;
-
-		rsyserr(FERROR, rename_errno, "rename %s to backup %s",
-			fname, fnamebak);
-		errno = rename_errno;
-		return 0;
-	}
-
-	return 1;
-}
-
-
-/****************************************************************************
-Create a directory given an absolute path, perms based upon another directory
-path
-****************************************************************************/
-int make_bak_dir(const char *fullpath)
-{
-	char fbuf[MAXPATHLEN], *rel, *end, *p;
-	struct file_struct *file;
-	int len = backup_dir_len;
-	stat_x sx;
-
-	while (*fullpath == '.' && fullpath[1] == '/') {
-		fullpath += 2;
-		len -= 2;
-	}
-
-	if (strlcpy(fbuf, fullpath, sizeof fbuf) >= sizeof fbuf)
-		return -1;
-
-	rel = fbuf + len;
-	end = p = rel + strlen(rel);
-
-	/* Try to find an existing dir, starting from the deepest dir. */
-	while (1) {
-		if (--p == fbuf)
-			return -1;
-		if (*p == '/') {
-			*p = '\0';
-			if (mkdir_defmode(fbuf) == 0)
-				break;
-			if (errno != ENOENT) {
-				rsyserr(FERROR, errno,
-					"make_bak_dir mkdir %s failed",
-					full_fname(fbuf));
-				return -1;
-			}
-		}
-	}
-
-	/* Make all the dirs that we didn't find on the way here. */
-	while (1) {
-		if (p >= rel) {
-			/* Try to transfer the directory settings of the
-			 * actual dir that the files are coming from. */
-			if (x_stat(rel, &sx.st, NULL) < 0) {
-				rsyserr(FERROR, errno,
-					"make_bak_dir stat %s failed",
-					full_fname(rel));
-			} else {
-#ifdef SUPPORT_ACLS
-				sx.acc_acl = sx.def_acl = NULL;
+#ifdef SUPPORT_HARD_LINKS
+	if (!prefer_rename) {
+#ifndef CAN_HARDLINK_SYMLINK
+		if (S_ISLNK(stp->st_mode))
+			return 0; /* Use copy code. */
 #endif
-#ifdef SUPPORT_XATTRS
-				sx.xattr = NULL;
+#ifndef CAN_HARDLINK_SPECIAL
+		if (IS_SPECIAL(stp->st_mode) || IS_DEVICE(stp->st_mode))
+			return 0; /* Use copy code. */
 #endif
-				if (!(file = make_file(rel, NULL, NULL, 0, NO_FILTERS)))
-					continue;
-#ifdef SUPPORT_ACLS
-				if (preserve_acls && !S_ISLNK(file->mode)) {
-					get_acl(rel, &sx);
-					cache_tmp_acl(file, &sx);
-					free_acl(&sx);
-				}
-#endif
-#ifdef SUPPORT_XATTRS
-				if (preserve_xattrs) {
-					get_xattr(rel, &sx);
-					cache_tmp_xattr(file, &sx);
-					free_xattr(&sx);
-				}
-#endif
-				set_file_attrs(fbuf, file, NULL, NULL, 0);
-				unmake_file(file);
-#ifdef SUPPORT_XATTRS
-				uncache_tmp_xattrs();
-#endif
-			}
+		if (do_link(from, to) == 0) {
+			if (DEBUG_GTE(BACKUP, 1))
+				rprintf(FINFO, "make_backup: HLINK %s successful.\n", from);
+			return 2;
 		}
-		*p = '/';
-		p += strlen(p);
-		if (p == end)
-			break;
-		if (mkdir_defmode(fbuf) < 0) {
-			rsyserr(FERROR, errno, "make_bak_dir mkdir %s failed",
-				full_fname(fbuf));
-			return -1;
-		}
+		/* We prefer to rename a regular file rather than copy it. */
+		if (!S_ISREG(stp->st_mode) || errno == EEXIST || errno == EISDIR)
+			return 0;
 	}
-
-	return 0;
-}
-
-/* robustly move a file, creating new directory structures if necessary */
-static int robust_move(const char *src, char *dst)
-{
-	if (robust_rename(src, dst, NULL, 0755) < 0) {
-		int save_errno = errno ? errno : EINVAL; /* 0 paranoia */
-		if (errno == ENOENT && make_bak_dir(dst) == 0) {
-			if (robust_rename(src, dst, NULL, 0755) < 0)
-				save_errno = errno ? errno : save_errno;
-			else
-				save_errno = 0;
+#endif
+	if (do_rename(from, to) == 0) {
+		if (stp->st_nlink > 1 && !S_ISDIR(stp->st_mode)) {
+			/* If someone has hard-linked the file into the backup
+			 * dir, rename() might return success but do nothing! */
+			robust_unlink(from); /* Just in case... */
 		}
-		if (save_errno) {
-			errno = save_errno;
-			return -1;
-		}
-	}
-	return 0;
-}
-
-
-/* If we have a --backup-dir, then we get here from make_backup().
- * We will move the file to be deleted into a parallel directory tree. */
-static int keep_backup(const char *fname)
-{
-	stat_x sx;
-	struct file_struct *file;
-	char *buf;
-	int save_preserve_xattrs = preserve_xattrs;
-	int kept = 0;
-	int ret_code;
-
-	/* return if no file to keep */
-	if (x_lstat(fname, &sx.st, NULL) < 0)
+		if (DEBUG_GTE(BACKUP, 1))
+			rprintf(FINFO, "make_backup: RENAME %s successful.\n", from);
 		return 1;
-#ifdef SUPPORT_ACLS
-	sx.acc_acl = sx.def_acl = NULL;
-#endif
-#ifdef SUPPORT_XATTRS
-	sx.xattr = NULL;
-#endif
-
-	if (!(file = make_file(fname, NULL, NULL, 0, NO_FILTERS)))
-		return 1; /* the file could have disappeared */
-
-	if (!(buf = get_backup_name(fname))) {
-		unmake_file(file);
-#ifdef SUPPORT_XATTRS
-		uncache_tmp_xattrs();
-#endif
-		return 0;
 	}
+	return 0;
+}
+
+/* Hard-link, rename, or copy an item to the backup name.  Returns 0 for
+ * failure, 1 if item was moved, 2 if item was duplicated or hard linked
+ * into backup area, or 3 if item doesn't exist or isn't a regular file. */
+int make_backup(const char *fname, BOOL prefer_rename)
+{
+	stat_x sx;
+	struct file_struct *file;
+	int save_preserve_xattrs;
+	char *buf;
+	int ret = 0;
+
+	init_stat_x(&sx);
+	/* Return success if no file to keep. */
+	if (x_lstat(fname, &sx.st, NULL) < 0)
+		return 3;
+
+	if (!(buf = get_backup_name(fname)))
+		return 0;
+
+	/* Try a hard-link or a rename first.  Using rename is not atomic, but
+	 * is more efficient than forcing a copy for larger files when no hard-
+	 * linking is possible. */
+	if ((ret = link_or_rename(fname, buf, prefer_rename, &sx.st)) != 0)
+		goto success;
+	if (errno == EEXIST || errno == EISDIR) {
+		STRUCT_STAT bakst;
+		if (do_lstat(buf, &bakst) == 0) {
+			int flags = get_del_for_flag(bakst.st_mode) | DEL_FOR_BACKUP | DEL_RECURSE;
+			if (delete_item(buf, bakst.st_mode, flags) != 0)
+				return 0;
+		}
+		if ((ret = link_or_rename(fname, buf, prefer_rename, &sx.st)) != 0)
+			goto success;
+	}
+
+	/* Fall back to making a copy. */
+	if (!(file = make_file(fname, NULL, &sx.st, 0, NO_FILTERS)))
+		return 3; /* the file could have disappeared */
 
 #ifdef SUPPORT_ACLS
 	if (preserve_acls && !S_ISLNK(file->mode)) {
@@ -250,125 +277,72 @@ static int keep_backup(const char *fname)
 	/* Check to see if this is a device file, or link */
 	if ((am_root && preserve_devices && IS_DEVICE(file->mode))
 	 || (preserve_specials && IS_SPECIAL(file->mode))) {
-		int save_errno;
-		do_unlink(buf);
-		if (do_mknod(buf, file->mode, sx.st.st_rdev) < 0) {
-			save_errno = errno ? errno : EINVAL; /* 0 paranoia */
-			if (errno == ENOENT && make_bak_dir(buf) == 0) {
-				if (do_mknod(buf, file->mode, sx.st.st_rdev) < 0)
-					save_errno = errno ? errno : save_errno;
-				else
-					save_errno = 0;
-			}
-			if (save_errno) {
-				rsyserr(FERROR, save_errno, "mknod %s failed",
-					full_fname(buf));
-			}
-		} else
-			save_errno = 0;
-		if (verbose > 2 && save_errno == 0) {
-			rprintf(FINFO, "make_backup: DEVICE %s successful.\n",
-				fname);
-		}
-		kept = 1;
-		do_unlink(fname);
-	}
-
-	if (!kept && S_ISDIR(file->mode)) {
-		/* make an empty directory */
-		if (do_mkdir(buf, file->mode) < 0) {
-			int save_errno = errno ? errno : EINVAL; /* 0 paranoia */
-			if (errno == ENOENT && make_bak_dir(buf) == 0) {
-				if (do_mkdir(buf, file->mode) < 0)
-					save_errno = errno ? errno : save_errno;
-				else
-					save_errno = 0;
-			}
-			if (save_errno) {
-				rsyserr(FINFO, save_errno, "mkdir %s failed",
-					full_fname(buf));
-			}
-		}
-
-		ret_code = do_rmdir(fname);
-		if (verbose > 2) {
-			rprintf(FINFO, "make_backup: RMDIR %s returns %i\n",
-				full_fname(fname), ret_code);
-		}
-		kept = 1;
+		if (do_mknod(buf, file->mode, sx.st.st_rdev) < 0)
+			rsyserr(FERROR, errno, "mknod %s failed", full_fname(buf));
+		else if (DEBUG_GTE(BACKUP, 1))
+			rprintf(FINFO, "make_backup: DEVICE %s successful.\n", fname);
+		ret = 2;
 	}
 
 #ifdef SUPPORT_LINKS
-	if (!kept && preserve_links && S_ISLNK(file->mode)) {
+	if (!ret && preserve_links && S_ISLNK(file->mode)) {
 		const char *sl = F_SYMLINK(file);
 		if (safe_symlinks && unsafe_symlink(sl, fname)) {
-			if (verbose) {
+			if (INFO_GTE(SYMSAFE, 1)) {
 				rprintf(FINFO, "not backing up unsafe symlink \"%s\" -> \"%s\"\n",
 					fname, sl);
 			}
-			kept = 1;
+			ret = 2;
 		} else {
-			do_unlink(buf);
-			if (do_symlink(sl, buf) < 0) {
-				int save_errno = errno ? errno : EINVAL; /* 0 paranoia */
-				if (errno == ENOENT && make_bak_dir(buf) == 0) {
-					if (do_symlink(sl, buf) < 0)
-						save_errno = errno ? errno : save_errno;
-					else
-						save_errno = 0;
-				}
-				if (save_errno) {
-					rsyserr(FERROR, save_errno, "link %s -> \"%s\"",
-						full_fname(buf), sl);
-				}
-			}
-			do_unlink(fname);
-			kept = 1;
+			if (do_symlink(sl, buf) < 0)
+				rsyserr(FERROR, errno, "link %s -> \"%s\"", full_fname(buf), sl);
+			else if (DEBUG_GTE(BACKUP, 1))
+				rprintf(FINFO, "make_backup: SYMLINK %s successful.\n", fname);
+			ret = 2;
 		}
 	}
 #endif
 
-	if (!kept && !S_ISREG(file->mode)) {
-		rprintf(FINFO, "make_bak: skipping non-regular file %s\n",
-			fname);
+	if (!ret && !S_ISREG(file->mode)) {
+		rprintf(FINFO, "make_bak: skipping non-regular file %s\n", fname);
 		unmake_file(file);
 #ifdef SUPPORT_XATTRS
 		uncache_tmp_xattrs();
 #endif
-		return 1;
+		return 3;
 	}
 
-	/* move to keep tree if a file */
-	if (!kept) {
-		if (robust_move(fname, buf) != 0) {
+	/* Copy to backup tree if a file. */
+	if (!ret) {
+		if (copy_file(fname, buf, -1, file->mode) < 0) {
 			rsyserr(FERROR, errno, "keep_backup failed: %s -> \"%s\"",
 				full_fname(fname), buf);
-		} else if (sx.st.st_nlink > 1) {
-			/* If someone has hard-linked the file into the backup
-			 * dir, rename() might return success but do nothing! */
-			robust_unlink(fname); /* Just in case... */
+			unmake_file(file);
+#ifdef SUPPORT_ACLS
+			uncache_tmp_acls();
+#endif
+#ifdef SUPPORT_XATTRS
+			uncache_tmp_xattrs();
+#endif
+			return 0;
 		}
+		if (DEBUG_GTE(BACKUP, 1))
+			rprintf(FINFO, "make_backup: COPY %s successful.\n", fname);
+		ret = 2;
 	}
+
+	save_preserve_xattrs = preserve_xattrs;
 	preserve_xattrs = 0;
 	set_file_attrs(buf, file, NULL, fname, 0);
 	preserve_xattrs = save_preserve_xattrs;
+
 	unmake_file(file);
 #ifdef SUPPORT_XATTRS
 	uncache_tmp_xattrs();
 #endif
 
-	if (verbose > 1) {
-		rprintf(FINFO, "backed up %s to %s\n",
-			fname, buf);
-	}
-	return 1;
-}
-
-
-/* main backup switch routine */
-int make_backup(const char *fname)
-{
-	if (backup_dir)
-		return keep_backup(fname);
-	return make_simple_backup(fname);
+  success:
+	if (INFO_GTE(BACKUP, 1))
+		rprintf(FINFO, "backed up %s to %s\n", fname, buf);
+	return ret;
 }

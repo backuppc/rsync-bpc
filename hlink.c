@@ -4,7 +4,7 @@
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2004-2009 Wayne Davison
+ * Copyright (C) 2004-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,8 +21,9 @@
  */
 
 #include "rsync.h"
+#include "inums.h"
+#include "ifuncs.h"
 
-extern int verbose;
 extern int dry_run;
 extern int list_only;
 extern int am_sender;
@@ -31,7 +32,6 @@ extern int do_xfers;
 extern int link_dest;
 extern int preserve_acls;
 extern int preserve_xattrs;
-extern int make_backups;
 extern int protocol_version;
 extern int remove_source_files;
 extern int stdout_format_has_i;
@@ -71,8 +71,14 @@ struct ht_int64_node *idev_find(int64 dev, int64 ino)
 	if (!dev_node || dev_node->key != dev+1) {
 		/* We keep a separate hash table of inodes for every device. */
 		dev_node = hashtable_find(dev_tbl, dev+1, 1);
-		if (!(tbl = dev_node->data))
+		if (!(tbl = dev_node->data)) {
 			tbl = dev_node->data = hashtable_create(512, 1);
+			if (DEBUG_GTE(HLINK, 3)) {
+				rprintf(FINFO,
+				    "[%s] created hashtable for dev %s\n",
+				    who_am_i(), big_num(dev));
+			}
+		}
 	} else
 		tbl = dev_node->data;
 
@@ -206,7 +212,7 @@ void match_hard_links(struct file_list *flist)
 }
 
 static int maybe_hard_link(struct file_struct *file, int ndx,
-			   const char *fname, int statret, stat_x *sxp,
+			   char *fname, int statret, stat_x *sxp,
 			   const char *oldname, STRUCT_STAT *old_stp,
 			   const char *realname, int itemizing, enum logcode code)
 {
@@ -218,32 +224,25 @@ static int maybe_hard_link(struct file_struct *file, int ndx,
 					ITEM_LOCAL_CHANGE | ITEM_XNAME_FOLLOWS,
 					0, "");
 			}
-			if (verbose > 1 && maybe_ATTRS_REPORT)
+			if (INFO_GTE(NAME, 2) && maybe_ATTRS_REPORT)
 				rprintf(FCLIENT, "%s is uptodate\n", fname);
 			file->flags |= FLAG_HLINK_DONE;
                         bpc_sysCall_statusFileSize(F_LENGTH(file));
 			return 0;
 		}
-		if (make_backups > 0) {
-			if (!make_backup(fname))
-				return -1;
-		} else if (robust_unlink(fname)) {
-			rsyserr(FERROR_XFER, errno, "unlink %s failed",
-				full_fname(fname));
-			return -1;
-		}
 	}
 
-	if (hard_link_one(file, fname, oldname, 0)) {
+	if (atomic_create(file, fname, NULL, oldname, MAKEDEV(0, 0), sxp, statret == 0 ? DEL_FOR_FILE : 0)) {
 		if (itemizing) {
 			itemize(fname, file, ndx, statret, sxp,
 				ITEM_LOCAL_CHANGE | ITEM_XNAME_FOLLOWS, 0,
 				realname);
 		}
-		if (code != FNONE && verbose)
+		if (code != FNONE && INFO_GTE(NAME, 1))
 			rprintf(code, "%s => %s\n", fname, realname);
 		return 0;
 	}
+
 	return -1;
 }
 
@@ -289,7 +288,7 @@ static char *check_prior(struct file_struct *file, int gnum,
 
 /* Only called if FLAG_HLINKED is set and FLAG_HLINK_FIRST is not.  Returns:
  * 0 = process the file, 1 = skip the file, -1 = error occurred. */
-int hard_link_check(struct file_struct *file, int ndx, const char *fname,
+int hard_link_check(struct file_struct *file, int ndx, char *fname,
 		    int statret, stat_x *sxp, int itemizing,
 		    enum logcode code)
 {
@@ -308,6 +307,10 @@ int hard_link_check(struct file_struct *file, int ndx, const char *fname,
 		if (!flist) {
 			/* The previous file was skipped, so this one is
 			 * treated as if it were the first in its group. */
+			if (DEBUG_GTE(HLINK, 2)) {
+				rprintf(FINFO, "hlink for %d (%s,%d): virtual first\n",
+					ndx, f_name(file, NULL), gnum);
+			}
 			return 0;
 		}
 
@@ -324,7 +327,15 @@ int hard_link_check(struct file_struct *file, int ndx, const char *fname,
 				F_HL_PREV(prev_file) = ndx;
 				file->flags |= FLAG_FILE_SENT;
 				cur_flist->in_progress++;
+				if (DEBUG_GTE(HLINK, 2)) {
+					rprintf(FINFO, "hlink for %d (%s,%d): waiting for %d\n",
+						ndx, f_name(file, NULL), gnum, F_HL_PREV(file));
+				}
 				return 1;
+			}
+			if (DEBUG_GTE(HLINK, 2)) {
+				rprintf(FINFO, "hlink for %d (%s,%d): looking for a leader\n",
+					ndx, f_name(file, NULL), gnum);
 			}
 			return 0;
 		}
@@ -333,7 +344,6 @@ int hard_link_check(struct file_struct *file, int ndx, const char *fname,
 		if (!(prev_file->flags & FLAG_HLINK_FIRST)) {
 			/* The previous previous is FIRST when prev is not. */
 			prev_name = realname = check_prior(prev_file, gnum, &prev_ndx, &flist);
-			assert(prev_name != NULL || flist != NULL);
 			/* Update our previous pointer to point to the FIRST. */
 			F_HL_PREV(file) = prev_ndx;
 		}
@@ -341,9 +351,14 @@ int hard_link_check(struct file_struct *file, int ndx, const char *fname,
 		if (!prev_name) {
 			int alt_dest;
 
+			assert(flist != NULL);
 			prev_file = flist->files[prev_ndx - flist->ndx_start];
 			/* F_HL_PREV() is alt_dest value when DONE && FIRST. */
 			alt_dest = F_HL_PREV(prev_file);
+			if (DEBUG_GTE(HLINK, 2)) {
+				rprintf(FINFO, "hlink for %d (%s,%d): found flist match (alt %d)\n",
+					ndx, f_name(file, NULL), gnum, alt_dest);
+			}
 
 			if (alt_dest >= 0 && dry_run) {
 				pathjoin(namebuf, MAXPATHLEN, basis_dir[alt_dest],
@@ -355,6 +370,11 @@ int hard_link_check(struct file_struct *file, int ndx, const char *fname,
 				realname = prev_name;
 			}
 		}
+	}
+
+	if (DEBUG_GTE(HLINK, 2)) {
+		rprintf(FINFO, "hlink for %d (%s,%d): leader is %d (%s)\n",
+			ndx, f_name(file, NULL), gnum, prev_ndx, prev_name);
 	}
 
 	if (link_stat(prev_name, &prev_st, 0) < 0) {
@@ -372,12 +392,7 @@ int hard_link_check(struct file_struct *file, int ndx, const char *fname,
 		char cmpbuf[MAXPATHLEN];
 		stat_x alt_sx;
 		int j = 0;
-#ifdef SUPPORT_ACLS
-		alt_sx.acc_acl = alt_sx.def_acl = NULL;
-#endif
-#ifdef SUPPORT_XATTRS
-		alt_sx.xattr = NULL;
-#endif
+		init_stat_x(&alt_sx);
 		do {
 			pathjoin(cmpbuf, MAXPATHLEN, basis_dir[j], fname);
 			if (link_stat(cmpbuf, &alt_sx.st, 0) < 0)
@@ -388,10 +403,10 @@ int hard_link_check(struct file_struct *file, int ndx, const char *fname,
 					continue;
 				statret = 1;
 				if (stdout_format_has_i == 0
-				 || (verbose < 2 && stdout_format_has_i < 2)) {
+				 || (!INFO_GTE(NAME, 2) && stdout_format_has_i < 2)) {
 					itemizing = 0;
 					code = FNONE;
-					if (verbose > 1 && maybe_ATTRS_REPORT)
+					if (INFO_GTE(NAME, 2) && maybe_ATTRS_REPORT)
 						rprintf(FCLIENT, "%s is uptodate\n", fname);
 				}
 				break;
@@ -427,16 +442,8 @@ int hard_link_check(struct file_struct *file, int ndx, const char *fname,
 				}
 			}
 #endif
-		} else {
-#ifdef SUPPORT_ACLS
-			if (preserve_acls)
-				free_acl(&alt_sx);
-#endif
-#ifdef SUPPORT_XATTRS
-			if (preserve_xattrs)
-				free_xattr(&alt_sx);
-#endif
-		}
+		} else
+			free_stat_x(&alt_sx);
 	}
 
 	if (maybe_hard_link(file, ndx, fname, statret, sxp, prev_name, &prev_st,
@@ -455,7 +462,7 @@ int hard_link_one(struct file_struct *file, const char *fname,
 	if (do_link(oldname, fname) < 0) {
 		enum logcode code;
 		if (terse) {
-			if (!verbose)
+			if (!INFO_GTE(NAME, 1))
 				return 0;
 			code = FINFO;
 		} else
@@ -483,7 +490,7 @@ void finish_hard_link(struct file_struct *file, const char *fname, int fin_ndx,
 	int prev_statret, ndx, prev_ndx = F_HL_PREV(file);
 
 	if (stp == NULL && prev_ndx >= 0) {
-		if (link_stat(fname, &st, 0) < 0) {
+		if (link_stat(fname, &st, 0) < 0 && !dry_run) {
 			rsyserr(FERROR_XFER, errno, "stat %s failed",
 				full_fname(fname));
 			return;
@@ -501,12 +508,7 @@ void finish_hard_link(struct file_struct *file, const char *fname, int fin_ndx,
 	} else
 		our_name = fname;
 
-#ifdef SUPPORT_ACLS
-	prev_sx.acc_acl = prev_sx.def_acl = NULL;
-#endif
-#ifdef SUPPORT_XATTRS
-	prev_sx.xattr = NULL;
-#endif
+	init_stat_x(&prev_sx);
 
 	while ((ndx = prev_ndx) >= 0) {
 		int val;
@@ -519,14 +521,7 @@ void finish_hard_link(struct file_struct *file, const char *fname, int fin_ndx,
 		val = maybe_hard_link(file, ndx, prev_name, prev_statret, &prev_sx,
 				      our_name, stp, fname, itemizing, code);
 		flist->in_progress--;
-#ifdef SUPPORT_ACLS
-		if (preserve_acls)
-			free_acl(&prev_sx);
-#endif
-#ifdef SUPPORT_XATTRS
-		if (preserve_xattrs)
-			free_xattr(&prev_sx);
-#endif
+		free_stat_x(&prev_sx);
 		if (val < 0)
 			continue;
 		if (remove_source_files == 1 && do_xfers)

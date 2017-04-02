@@ -2,7 +2,7 @@
  * Trivial ls for comparing two directories after running an rsync.
  *
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -43,10 +43,12 @@
 /* These are to make syscall.o shut up. */
 int dry_run = 0;
 int am_root = 0;
+int am_sender = 1;
 int read_only = 1;
 int list_only = 0;
 int link_times = 0;
 int link_owner = 0;
+int nsec_times = 0;
 int preserve_perms = 0;
 int preserve_executability = 0;
 
@@ -146,9 +148,9 @@ static void list_file(const char *fname)
 			buf.st_uid = buf.st_gid = 0;
 		strlcpy(linkbuf, " -> ", sizeof linkbuf);
 		/* const-cast required for silly UNICOS headers */
-		len = readlink((char *) fname, linkbuf+4, sizeof(linkbuf) - 4);
+		len = do_readlink((char *) fname, linkbuf+4, sizeof(linkbuf) - 4);
 		if (len == -1)
-			failed("readlink", fname);
+			failed("do_readlink", fname);
 		else
 			/* it's not nul-terminated */
 			linkbuf[4+len] = 0;
@@ -159,9 +161,10 @@ static void list_file(const char *fname)
 	permstring(permbuf, buf.st_mode);
 
 	if (buf.st_mtime) {
+		int len;
 		mt = gmtime(&buf.st_mtime);
 
-		snprintf(datebuf, sizeof datebuf,
+		len = snprintf(datebuf, sizeof datebuf,
 			"%04d-%02d-%02d %02d:%02d:%02d",
 			(int)mt->tm_year + 1900,
 			(int)mt->tm_mon + 1,
@@ -169,8 +172,17 @@ static void list_file(const char *fname)
 			(int)mt->tm_hour,
 			(int)mt->tm_min,
 			(int)mt->tm_sec);
-	} else
-		strlcpy(datebuf, "                   ", sizeof datebuf);
+#ifdef ST_MTIME_NSEC
+		if (nsec_times) {
+			snprintf(datebuf + len, sizeof datebuf - len,
+				".%09d", (int)buf.ST_MTIME_NSEC);
+		}
+#endif
+	} else {
+		int len = MIN(19 + 9*nsec_times, (int)sizeof datebuf - 1);
+		memset(datebuf, ' ', len);
+		datebuf[len] = '\0';
+	}
 
 	/* TODO: Perhaps escape special characters in fname? */
 
@@ -179,8 +191,8 @@ static void list_file(const char *fname)
 		printf("%5ld,%6ld",
 		    (long)major(buf.st_rdev),
 		    (long)minor(buf.st_rdev));
-	} else /* NB: use double for size since it might not fit in a long. */
-		printf("%12.0f", (double)buf.st_size);
+	} else
+		printf("%15s", do_big_num(buf.st_size, 1, NULL));
 	printf(" %6ld.%-6ld %6ld %s %s%s\n",
 	       (long)buf.st_uid, (long)buf.st_gid, (long)buf.st_nlink,
 	       datebuf, fname, linkbuf);
@@ -192,6 +204,9 @@ static struct poptOption long_options[] = {
   {"link-owner",      'L', POPT_ARG_NONE,   &link_owner, 0, 0, 0 },
 #ifdef SUPPORT_XATTRS
   {"fake-super",      'f', POPT_ARG_VAL,    &am_root, -1, 0, 0 },
+#endif
+#ifdef ST_MTIME_NSEC
+  {"nsec",            's', POPT_ARG_NONE,   &nsec_times, 0, 0, 0 },
 #endif
   {"help",            'h', POPT_ARG_NONE,   0, 'h', 0, 0 },
   {0,0,0,0,0,0,0}

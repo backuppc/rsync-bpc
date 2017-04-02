@@ -4,7 +4,7 @@
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2002-2009 Wayne Davison
+ * Copyright (C) 2002-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,16 +23,15 @@
 #include "rsync.h"
 #include "ifuncs.h"
 #include "rounding.h"
+#include "inums.h"
 #include "io.h"
 
-extern int verbose;
 extern int am_root;
 extern int am_server;
 extern int am_daemon;
 extern int am_sender;
 extern int am_generator;
 extern int inc_recurse;
-extern int do_progress;
 extern int always_checksum;
 extern int module_id;
 extern int ignore_errors;
@@ -52,6 +51,7 @@ extern int preserve_hard_links;
 extern int preserve_devices;
 extern int preserve_specials;
 extern int delete_during;
+extern int missing_args;
 extern int eol_nulls;
 extern int relative_paths;
 extern int implied_dirs;
@@ -66,17 +66,20 @@ extern int munge_symlinks;
 extern int use_safe_inc_flist;
 extern int need_unsorted_flist;
 extern int sender_symlink_iconv;
+extern int output_needs_newline;
+extern int sender_keeps_checksum;
 extern int unsort_ndx;
 extern uid_t our_uid;
 extern struct stats stats;
 extern char *filesfrom_host;
+extern char *usermap, *groupmap;
 
 extern char curr_dir[MAXPATHLEN];
 
 extern struct chmod_mode_struct *chmod_modes;
 
-extern struct filter_list_struct filter_list;
-extern struct filter_list_struct daemon_filter_list;
+extern filter_rule_list filter_list;
+extern filter_rule_list daemon_filter_list;
 
 #ifdef ICONV_OPTION
 extern int filesfrom_convert;
@@ -93,11 +96,13 @@ struct file_list *cur_flist, *first_flist, *dir_flist;
 int send_dir_ndx = -1, send_dir_depth = -1;
 int flist_cnt = 0; /* how many (non-tmp) file list objects exist */
 int file_total = 0; /* total of all active items over all file-lists */
+int file_old_total = 0; /* total of active items that will soon be gone */
 int flist_eof = 0; /* all the file-lists are now known */
 
 #define NORMAL_NAME 0
 #define SLASH_ENDING_NAME 1
 #define DOTDIR_NAME 2
+#define MISSING_NAME 3
 
 /* Starting from protocol version 26, we always use 64-bit ino_t and dev_t
  * internally, even if this platform does not allow files to have 64-bit inums.
@@ -122,14 +127,13 @@ static char tmp_sum[MAX_DIGEST_LEN];
 
 static char empty_sum[MAX_DIGEST_LEN];
 static int flist_count_offset; /* for --delete --progress */
-static int dir_count = 0;
 
 static void flist_sort_and_clean(struct file_list *flist, int strip_root);
 static void output_flist(struct file_list *flist);
 
 void init_flist(void)
 {
-	if (verbose > 4) {
+	if (DEBUG_GTE(FLIST, 4)) {
 		rprintf(FINFO, "FILE_STRUCT_LEN=%d, EXTRA_LEN=%d\n",
 			(int)FILE_STRUCT_LEN, (int)EXTRA_LEN);
 	}
@@ -140,14 +144,13 @@ void init_flist(void)
 
 static int show_filelist_p(void)
 {
-	return verbose && xfer_dirs && !am_server && !inc_recurse;
+	return INFO_GTE(FLIST, 1) && xfer_dirs && !am_server && !inc_recurse;
 }
 
 static void start_filelist_progress(char *kind)
 {
 	rprintf(FCLIENT, "%s ... ", kind);
-	if (verbose > 1 || do_progress)
-		rprintf(FCLIENT, "\n");
+	output_needs_newline = 1;
 	rflush(FINFO);
 }
 
@@ -158,18 +161,20 @@ static void emit_filelist_progress(int count)
 
 static void maybe_emit_filelist_progress(int count)
 {
-	if (do_progress && show_filelist_p() && (count % 100) == 0)
+	if (INFO_GTE(FLIST, 2) && show_filelist_p() && (count % 100) == 0)
 		emit_filelist_progress(count);
 }
 
 static void finish_filelist_progress(const struct file_list *flist)
 {
-	if (do_progress) {
+	if (INFO_GTE(FLIST, 2)) {
 		/* This overwrites the progress line */
 		rprintf(FINFO, "%d file%sto consider\n",
 			flist->used, flist->used == 1 ? " " : "s ");
-	} else
+	} else {
+		output_needs_newline = 0;
 		rprintf(FINFO, "done\n");
+	}
 }
 
 void show_flist_stats(void)
@@ -196,7 +201,7 @@ static int readlink_stat(const char *path, STRUCT_STAT *stp, char *linkbuf)
 			return -1;
 		linkbuf[llen] = '\0';
 		if (copy_unsafe_links && unsafe_symlink(linkbuf, path)) {
-			if (verbose > 1) {
+			if (INFO_GTE(SYMSAFE, 1)) {
 				rprintf(FINFO,"copying unsafe symlink \"%s\" -> \"%s\"\n",
 					path, linkbuf);
 			}
@@ -316,10 +321,10 @@ static void flist_expand(struct file_list *flist, int extra)
 	new_ptr = realloc_array(flist->files, struct file_struct *,
 				flist->malloced);
 
-	if (verbose >= 2 && flist->malloced != FLIST_START) {
-		rprintf(FCLIENT, "[%s] expand file_list pointer array to %.0f bytes, did%s move\n",
+	if (DEBUG_GTE(FLIST, 1) && flist->malloced != FLIST_START) {
+		rprintf(FCLIENT, "[%s] expand file_list pointer array to %s bytes, did%s move\n",
 		    who_am_i(),
-		    (double)sizeof flist->files[0] * flist->malloced,
+		    big_num(sizeof flist->files[0] * flist->malloced),
 		    (new_ptr == flist->files) ? " not" : "");
 	}
 
@@ -403,21 +408,35 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 	static gid_t gid;
 	static const char *user_name, *group_name;
 	static char lastname[MAXPATHLEN];
+#ifdef SUPPORT_HARD_LINKS
 	int first_hlink_ndx = -1;
+#endif
 	int l1, l2;
 	int xflags;
 
-	/* Initialize starting value of xflags. */
-	if (protocol_version >= 30 && S_ISDIR(file->mode)) {
-		dir_count++;
-		if (file->flags & FLAG_CONTENT_DIR)
-			xflags = file->flags & FLAG_TOP_DIR;
-		else if (file->flags & FLAG_IMPLIED_DIR)
-			xflags = XMIT_TOP_DIR | XMIT_NO_CONTENT_DIR;
-		else
-			xflags = XMIT_NO_CONTENT_DIR;
-	} else
-		xflags = file->flags & FLAG_TOP_DIR; /* FLAG_TOP_DIR == XMIT_TOP_DIR */
+	/* Initialize starting value of xflags and adjust counts. */
+	if (S_ISREG(file->mode))
+		xflags = 0;
+	else if (S_ISDIR(file->mode)) {
+		stats.num_dirs++;
+		if (protocol_version >= 30) {
+			if (file->flags & FLAG_CONTENT_DIR)
+				xflags = file->flags & FLAG_TOP_DIR;
+			else if (file->flags & FLAG_IMPLIED_DIR)
+				xflags = XMIT_TOP_DIR | XMIT_NO_CONTENT_DIR;
+			else
+				xflags = XMIT_NO_CONTENT_DIR;
+		} else
+			xflags = file->flags & FLAG_TOP_DIR; /* FLAG_TOP_DIR == XMIT_TOP_DIR */
+	} else {
+		if (S_ISLNK(file->mode))
+			stats.num_symlinks++;
+		else if (IS_DEVICE(file->mode))
+			stats.num_devices++;
+		else if (IS_SPECIAL(file->mode))
+			stats.num_specials++;
+		xflags = 0;
+	}
 
 	if (file->mode == mode)
 		xflags |= XMIT_SAME_MODE;
@@ -439,7 +458,7 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 			if (protocol_version < 30 && (uint32)minor(rdev) <= 0xFFu)
 				xflags |= XMIT_RDEV_MINOR_8_pre30;
 		}
-	} else if (preserve_specials && IS_SPECIAL(mode)) {
+	} else if (preserve_specials && IS_SPECIAL(mode) && protocol_version < 31) {
 		/* Special files don't need an rdev number, so just make
 		 * the historical transmission of the value efficient. */
 		if (protocol_version < 28)
@@ -476,6 +495,8 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 		xflags |= XMIT_SAME_TIME;
 	else
 		modtime = file->modtime;
+	if (NSEC_BUMP(file) && protocol_version >= 31)
+		xflags |= XMIT_MOD_NSEC;
 
 #ifdef SUPPORT_HARD_LINKS
 	if (tmp_dev != -1) {
@@ -485,6 +506,17 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 			if (first_hlink_ndx < 0) {
 				np->data = (void*)(long)(first_ndx + ndx + 1);
 				xflags |= XMIT_HLINK_FIRST;
+			}
+			if (DEBUG_GTE(HLINK, 1)) {
+				if (first_hlink_ndx >= 0) {
+					rprintf(FINFO, "[%s] #%d hard-links #%d (%sabbrev)\n",
+						who_am_i(), first_ndx + ndx, first_hlink_ndx,
+						first_hlink_ndx >= first_ndx ? "" : "un");
+				} else if (DEBUG_GTE(HLINK, 3)) {
+					rprintf(FINFO, "[%s] dev:inode for #%d is %s:%s\n",
+						who_am_i(), first_ndx + ndx,
+						big_num(tmp_dev), big_num(tmp_ino));
+				}
 			}
 		} else {
 			if (tmp_dev == dev) {
@@ -532,11 +564,13 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 		write_byte(f, l2);
 	write_buf(f, fname + l1, l2);
 
+#ifdef SUPPORT_HARD_LINKS
 	if (first_hlink_ndx >= 0) {
 		write_varint(f, first_hlink_ndx);
 		if (first_hlink_ndx >= first_ndx)
 			goto the_end;
 	}
+#endif
 
 	write_varlong30(f, F_LENGTH(file), 3);
 	if (!(xflags & XMIT_SAME_TIME)) {
@@ -545,6 +579,8 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 		else
 			write_int(f, modtime);
 	}
+	if (xflags & XMIT_MOD_NSEC)
+		write_varint(f, F_MOD_NSEC(file));
 	if (!(xflags & XMIT_SAME_MODE))
 		write_int(f, to_wire_mode(mode));
 	if (preserve_uid && !(xflags & XMIT_SAME_UID)) {
@@ -572,7 +608,7 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 		}
 	}
 	if ((preserve_devices && IS_DEVICE(mode))
-	 || (preserve_specials && IS_SPECIAL(mode))) {
+	 || (preserve_specials && IS_SPECIAL(mode) && protocol_version < 31)) {
 		if (protocol_version < 28) {
 			if (!(xflags & XMIT_SAME_RDEV_pre28))
 				write_int(f, (int)rdev);
@@ -623,7 +659,9 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 		write_buf(f, sum, checksum_len);
 	}
 
+#ifdef SUPPORT_HARD_LINKS
   the_end:
+#endif
 	strlcpy(lastname, fname, MAXPATHLEN);
 
 	if (S_ISREG(mode) || S_ISLNK(mode))
@@ -652,6 +690,7 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 	int extra_len = file_extra_cnt * EXTRA_LEN;
 	int first_hlink_ndx = -1;
 	int64 file_length;
+	uint32 modtime_nsec;
 	const char *basename;
 	struct file_struct *file;
 	alloc_pool_t *pool;
@@ -684,9 +723,9 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 		xbuf outbuf, inbuf;
 
 		INIT_CONST_XBUF(outbuf, thisname);
-		INIT_XBUF(inbuf, lastname, basename_len, -1);
+		INIT_XBUF(inbuf, lastname, basename_len, (size_t)-1);
 
-		if (iconvbufs(ic_recv, &inbuf, &outbuf, 0) < 0) {
+		if (iconvbufs(ic_recv, &inbuf, &outbuf, ICB_INIT) < 0) {
 			io_error |= IOERR_GENERAL;
 			rprintf(FERROR_UTF8,
 			    "[%s] cannot convert filename: %s (%s)\n",
@@ -697,8 +736,11 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 	}
 #endif
 
-	if (*thisname)
-		clean_fname(thisname, 0);
+	if (*thisname
+	 && (clean_fname(thisname, CFN_REFUSE_DOT_DOT_DIRS) < 0 || (!relative_paths && *thisname == '/'))) {
+		rprintf(FERROR, "ABORTING due to unsafe pathname from sender: %s\n", thisname);
+		exit_cleanup(RERR_PROTOCOL);
+	}
 
 	if (sanitize_paths)
 		sanitize_path(thisname, thisname, "", 0, SP_DEFAULT);
@@ -726,10 +768,16 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 				first_hlink_ndx, flist->ndx_start + flist->used);
 			exit_cleanup(RERR_PROTOCOL);
 		}
+		if (DEBUG_GTE(HLINK, 1)) {
+			rprintf(FINFO, "[%s] #%d hard-links #%d (%sabbrev)\n",
+				who_am_i(), flist->used+flist->ndx_start, first_hlink_ndx,
+				first_hlink_ndx >= flist->ndx_start ? "" : "un");
+		}
 		if (first_hlink_ndx >= flist->ndx_start) {
 			struct file_struct *first = flist->files[first_hlink_ndx - flist->ndx_start];
 			file_length = F_LENGTH(first);
 			modtime = first->modtime;
+			modtime_nsec = F_MOD_NSEC(first);
 			mode = first->mode;
 			if (preserve_uid)
 				uid = F_OWNER(first);
@@ -763,10 +811,14 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 		} else
 			modtime = read_int(f);
 	}
+	if (xflags & XMIT_MOD_NSEC)
+		modtime_nsec = read_varint(f);
+	else
+		modtime_nsec = 0;
 	if (!(xflags & XMIT_SAME_MODE))
 		mode = from_wire_mode(read_int(f));
 
-	if (chmod_modes && !S_ISLNK(mode))
+	if (chmod_modes && !S_ISLNK(mode) && mode)
 		mode = tweak_mode(mode, chmod_modes);
 
 	if (preserve_uid && !(xflags & XMIT_SAME_UID)) {
@@ -776,7 +828,7 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 			uid = (uid_t)read_varint(f);
 			if (xflags & XMIT_USER_NAME_FOLLOWS)
 				uid = recv_user_name(f, uid);
-			else if (inc_recurse && am_root && !numeric_ids)
+			else if (inc_recurse && am_root && (!numeric_ids || usermap))
 				uid = match_uid(uid);
 		}
 	}
@@ -788,13 +840,13 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 			gid_flags = 0;
 			if (xflags & XMIT_GROUP_NAME_FOLLOWS)
 				gid = recv_group_name(f, gid, &gid_flags);
-			else if (inc_recurse && (!am_root || !numeric_ids))
+			else if (inc_recurse && (!am_root || !numeric_ids || groupmap))
 				gid = match_gid(gid, &gid_flags);
 		}
 	}
 
 	if ((preserve_devices && IS_DEVICE(mode))
-	 || (preserve_specials && IS_SPECIAL(mode))) {
+	 || (preserve_specials && IS_SPECIAL(mode) && protocol_version < 31)) {
 		if (protocol_version < 28) {
 			if (!(xflags & XMIT_SAME_RDEV_pre28))
 				rdev = (dev_t)read_int(f);
@@ -861,6 +913,10 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 	if (file_length > 0xFFFFFFFFu && S_ISREG(mode))
 		extra_len += EXTRA_LEN;
 #endif
+#ifdef HAVE_UTIMENSAT
+	if (modtime_nsec)
+		extra_len += EXTRA_LEN;
+#endif
 	if (file_length < 0) {
 		rprintf(FERROR, "Offset underflow: file-length is negative\n");
 		exit_cleanup(RERR_UNSUPPORTED);
@@ -892,10 +948,23 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 	memcpy(bp, basename, basename_len);
 
 #ifdef SUPPORT_HARD_LINKS
-	if (xflags & XMIT_HLINKED)
+	if (xflags & XMIT_HLINKED
+#ifndef CAN_HARDLINK_SYMLINK
+	 && !S_ISLNK(mode)
+#endif
+#ifndef CAN_HARDLINK_SPECIAL
+	 && !IS_SPECIAL(mode) && !IS_DEVICE(mode)
+#endif
+	)
 		file->flags |= FLAG_HLINKED;
 #endif
 	file->modtime = (time_t)modtime;
+#ifdef HAVE_UTIMENSAT
+	if (modtime_nsec) {
+		file->flags |= FLAG_MOD_NSEC;
+		OPT_EXTRA(file, 0)->unum = modtime_nsec;
+	}
+#endif
 	file->len32 = (uint32)file_length;
 #if SIZEOF_INT64 >= 8
 	if (file_length > 0xFFFFFFFFu && S_ISREG(mode)) {
@@ -904,7 +973,7 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 		exit_cleanup(RERR_UNSUPPORTED);
 #else
 		file->flags |= FLAG_LENGTH64;
-		OPT_EXTRA(file, 0)->unum = (uint32)(file_length >> 32);
+		OPT_EXTRA(file, NSEC_BUMP(file))->unum = (uint32)(file_length >> 32);
 #endif
 	}
 #endif
@@ -984,7 +1053,7 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 				read_sbuf(f, inbuf.buf, inbuf.len);
 				INIT_XBUF(outbuf, bp, 0, alloc_len);
 
-				if (iconvbufs(ic_recv, &inbuf, &outbuf, 0) < 0) {
+				if (iconvbufs(ic_recv, &inbuf, &outbuf, ICB_INIT) < 0) {
 					io_error |= IOERR_GENERAL;
 					rprintf(FERROR_XFER,
 					    "[%s] cannot convert symlink data for: %s (%s)\n",
@@ -1097,8 +1166,10 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 	if (sanitize_paths)
 		sanitize_path(thisname, thisname, "", 0, SP_DEFAULT);
 
-	if (stp && S_ISDIR(stp->st_mode)) {
-		st = *stp; /* Needed for "symlink/." with --relative. */
+	if (stp && (S_ISDIR(stp->st_mode) || IS_MISSING_FILE(*stp))) {
+		/* This is needed to handle a "symlink/." with a --relative
+		 * dir, or a request to delete a specific file. */
+		st = *stp;
 		*linkname = '\0'; /* make IBM code checker happy */
 	} else if (readlink_stat(thisname, &st, linkname) != 0) {
 		int save_errno = errno;
@@ -1139,6 +1210,11 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 				full_fname(thisname));
 		}
 		return NULL;
+	} else if (IS_MISSING_FILE(st)) {
+		io_error |= IOERR_GENERAL;
+		rprintf(FINFO, "skipping file with bogus (zero) st_mode: %s\n",
+			full_fname(thisname));
+		return NULL;
 	}
 
 	if (filter_level == NO_FILTERS)
@@ -1155,7 +1231,7 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 		if (one_file_system && st.st_dev != filesystem_dev
 		 && BITS_SETnUNSET(flags, FLAG_CONTENT_DIR, FLAG_TOP_DIR)) {
 			if (one_file_system > 1) {
-				if (verbose > 1) {
+				if (INFO_GTE(MOUNT, 1)) {
 					rprintf(FINFO,
 					    "[%s] skipping mount-point dir %s\n",
 					    who_am_i(), thisname);
@@ -1178,7 +1254,7 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 #ifdef SUPPORT_LINKS
 		if (!S_ISLNK(st.st_mode))
 #endif
-			if (access(thisname, R_OK) != 0)
+			if (bpc_access(thisname, R_OK) != 0)
 				return NULL;
 	}
 
@@ -1204,7 +1280,7 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 		pool = NULL;
 	}
 
-	if (verbose > 2) {
+	if (DEBUG_GTE(FLIST, 2)) {
 		rprintf(FINFO, "[%s] make_file(%s,*,%d)\n",
 			who_am_i(), thisname, filter_level);
 	}
@@ -1227,10 +1303,20 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 	linkname_len = 0;
 #endif
 
+#ifdef ST_MTIME_NSEC
+	if (st.ST_MTIME_NSEC && protocol_version >= 31)
+		extra_len += EXTRA_LEN;
+#endif
 #if SIZEOF_CAPITAL_OFF_T >= 8
 	if (st.st_size > 0xFFFFFFFFu && S_ISREG(st.st_mode))
 		extra_len += EXTRA_LEN;
 #endif
+
+	if (always_checksum && am_sender && S_ISREG(st.st_mode)) {
+		file_checksum(thisname, &st, tmp_sum);
+		if (sender_keeps_checksum)
+			extra_len += SUM_EXTRA_CNT * EXTRA_LEN;
+	}
 
 #if EXTRA_ROUNDING > 0
 	if (extra_len & (EXTRA_ROUNDING * EXTRA_LEN))
@@ -1275,11 +1361,17 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 
 	file->flags = flags;
 	file->modtime = st.st_mtime;
+#ifdef ST_MTIME_NSEC
+	if (st.ST_MTIME_NSEC && protocol_version >= 31) {
+		file->flags |= FLAG_MOD_NSEC;
+		OPT_EXTRA(file, 0)->unum = st.ST_MTIME_NSEC;
+	}
+#endif
 	file->len32 = (uint32)st.st_size;
 #if SIZEOF_CAPITAL_OFF_T >= 8
 	if (st.st_size > 0xFFFFFFFFu && S_ISREG(st.st_mode)) {
 		file->flags |= FLAG_LENGTH64;
-		OPT_EXTRA(file, 0)->unum = (uint32)(st.st_size >> 32);
+		OPT_EXTRA(file, NSEC_BUMP(file))->unum = (uint32)(st.st_size >> 32);
 	}
 #endif
 	file->mode = st.st_mode;
@@ -1298,9 +1390,6 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 		memcpy(bp + basename_len, linkname, linkname_len);
 #endif
 
-	if (always_checksum && am_sender && S_ISREG(st.st_mode))
-		file_checksum(thisname, tmp_sum, st.st_size);
-
 	if (am_sender)
 		F_PATHNAME(file) = pathname;
 	else if (!pool)
@@ -1312,8 +1401,11 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 		return NULL;
 	}
 
+	if (sender_keeps_checksum && S_ISREG(st.st_mode))
+		memcpy(F_SUM(file), tmp_sum, checksum_len);
+
 	if (unsort_ndx)
-		F_NDX(file) = dir_count;
+		F_NDX(file) = stats.num_dirs;
 
 	return file;
 }
@@ -1334,7 +1426,7 @@ static struct file_struct *send_file_name(int f, struct file_list *flist,
 	if (!file)
 		return NULL;
 
-	if (chmod_modes && !S_ISLNK(file->mode))
+	if (chmod_modes && !S_ISLNK(file->mode) && file->mode)
 		file->mode = tweak_mode(file->mode, chmod_modes);
 
 	if (f >= 0) {
@@ -1348,6 +1440,7 @@ static struct file_struct *send_file_name(int f, struct file_list *flist,
 #endif
 #if defined SUPPORT_ACLS || defined SUPPORT_XATTRS
 		stat_x sx;
+		init_stat_x(&sx);
 #endif
 
 #ifdef SUPPORT_LINKS
@@ -1377,14 +1470,14 @@ static struct file_struct *send_file_name(int f, struct file_list *flist,
 			if (file->dirname) {
 				INIT_XBUF_STRLEN(inbuf, (char*)file->dirname);
 				outbuf.size -= 2; /* Reserve room for '/' & 1 more char. */
-				if (iconvbufs(ic_send, &inbuf, &outbuf, 0) < 0)
+				if (iconvbufs(ic_send, &inbuf, &outbuf, ICB_INIT) < 0)
 					goto convert_error;
 				outbuf.size += 2;
 				fbuf[outbuf.len++] = '/';
 			}
 
 			INIT_XBUF_STRLEN(inbuf, (char*)file->basename);
-			if (iconvbufs(ic_send, &inbuf, &outbuf, 0) < 0) {
+			if (iconvbufs(ic_send, &inbuf, &outbuf, ICB_INIT) < 0) {
 			  convert_error:
 				io_error |= IOERR_GENERAL;
 				rprintf(FERROR_XFER,
@@ -1398,7 +1491,7 @@ static struct file_struct *send_file_name(int f, struct file_list *flist,
 			if (symlink_len && sender_symlink_iconv) {
 				INIT_XBUF(inbuf, (char*)symlink_name, symlink_len, (size_t)-1);
 				INIT_CONST_XBUF(outbuf, symlink_buf);
-				if (iconvbufs(ic_send, &inbuf, &outbuf, 0) < 0) {
+				if (iconvbufs(ic_send, &inbuf, &outbuf, ICB_INIT) < 0) {
 					io_error |= IOERR_GENERAL;
 					f_name(file, fbuf);
 					rprintf(FERROR_XFER,
@@ -1419,7 +1512,6 @@ static struct file_struct *send_file_name(int f, struct file_list *flist,
 #ifdef SUPPORT_ACLS
 		if (preserve_acls && !S_ISLNK(file->mode)) {
 			sx.st.st_mode = file->mode;
-			sx.acc_acl = sx.def_acl = NULL;
 			if (get_acl(fname, &sx) < 0) {
 				io_error |= IOERR_GENERAL;
 				return NULL;
@@ -1429,7 +1521,6 @@ static struct file_struct *send_file_name(int f, struct file_list *flist,
 #ifdef SUPPORT_XATTRS
 		if (preserve_xattrs) {
 			sx.st.st_mode = file->mode;
-			sx.xattr = NULL;
 			if (get_xattr(fname, &sx) < 0) {
 				io_error |= IOERR_GENERAL;
 				return NULL;
@@ -1700,7 +1791,7 @@ static void send_implied_dirs(int f, struct file_list *flist, char *fname,
 	item_list *relname_list;
 	relnamecache **rnpp;
 	int len, need_new_dir, depth = 0;
-	struct filter_list_struct save_filter_list = filter_list;
+	filter_rule_list save_filter_list = filter_list;
 
 	flags = (flags | FLAG_IMPLIED_DIR) & ~(FLAG_TOP_DIR | FLAG_CONTENT_DIR);
 	filter_list.head = filter_list.tail = NULL; /* Don't filter implied dirs. */
@@ -1796,7 +1887,8 @@ static NORETURN void fatal_unsafe_io_error(void)
 	/* This (sadly) can only happen when pushing data because
 	 * the sender does not know about what kind of delete
 	 * is in effect on the receiving side when pulling. */
-	rprintf(FERROR_XFER, "FATAL I/O ERROR: dying to avoid a --delete-during issue with a pre-3.0.7 receiver.\n");
+	rprintf(FERROR_XFER, "FATAL I/O ERROR: dying to avoid a --delete-%s issue with a pre-3.0.7 receiver.\n",
+		delete_during == 2 ? "delay" : "during");
 	exit_cleanup(RERR_UNSUPPORTED);
 }
 
@@ -1853,7 +1945,9 @@ static void send1extra(int f, struct file_struct *file, struct file_list *flist)
 
 		if (name_type != NORMAL_NAME) {
 			STRUCT_STAT st;
-			if (link_stat(fbuf, &st, 1) != 0) {
+			if (name_type == MISSING_NAME)
+				memset(&st, 0, sizeof st);
+			else if (link_stat(fbuf, &st, 1) != 0) {
 				interpret_stat_error(fbuf, True);
 				continue;
 			}
@@ -1870,19 +1964,19 @@ void send_extra_file_list(int f, int at_least)
 	struct file_list *flist;
 	int64 start_write;
 	uint16 prev_flags;
-	int old_cnt, save_io_error = io_error;
+	int save_io_error = io_error;
 
 	if (flist_eof)
 		return;
 
+	if (at_least < 0)
+		at_least = file_total - file_old_total + 1;
+
 	/* Keep sending data until we have the requested number of
 	 * files in the upcoming file-lists. */
-	old_cnt = cur_flist->used;
-	for (flist = first_flist; flist != cur_flist; flist = flist->next)
-		old_cnt += flist->used;
-	while (file_total - old_cnt < at_least) {
+	while (file_total - file_old_total < at_least) {
 		struct file_struct *file = dir_flist->sorted[send_dir_ndx];
-		int dir_ndx, dstart = dir_count;
+		int dir_ndx, dstart = stats.num_dirs;
 		const char *pathname = F_PATHNAME(file);
 		int32 *dp;
 
@@ -1936,13 +2030,13 @@ void send_extra_file_list(int f, int at_least)
 
 		flist_sort_and_clean(flist, 0);
 
-		add_dirs_to_tree(send_dir_ndx, flist, dir_count - dstart);
+		add_dirs_to_tree(send_dir_ndx, flist, stats.num_dirs - dstart);
 		flist_done_allocating(flist);
 
 		file_total += flist->used;
 		stats.flist_size += stats.total_written - start_write;
 		stats.num_files += flist->used;
-		if (verbose > 3)
+		if (DEBUG_GTE(FLIST, 3))
 			output_flist(flist);
 
 		if (DIR_FIRST_CHILD(dp) >= 0) {
@@ -1953,6 +2047,8 @@ void send_extra_file_list(int f, int at_least)
 				if ((send_dir_ndx = DIR_PARENT(dp)) < 0) {
 					write_ndx(f, NDX_FLIST_EOF);
 					flist_eof = 1;
+					if (DEBUG_GTE(FLIST, 3))
+						rprintf(FINFO, "[%s] flist_eof=1\n", who_am_i());
 					change_local_filter_dir(NULL, 0, 0);
 					goto finish;
 				}
@@ -1965,7 +2061,7 @@ void send_extra_file_list(int f, int at_least)
 	}
 
   finish:
-	if (io_error != save_io_error && !ignore_errors)
+	if (io_error != save_io_error && protocol_version == 30 && !ignore_errors)
 		send_msg_int(MSG_IO_ERROR, io_error);
 }
 
@@ -1980,7 +2076,7 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 	struct timeval start_tv, end_tv;
 	int64 start_write;
 	int use_ff_fd = 0;
-	int disable_buffering;
+	int disable_buffering, reenable_multiplex = -1;
 	int flags = recurse ? FLAG_CONTENT_DIR : 0;
 	int reading_remotely = filesfrom_host != NULL;
 	int rl_flags = (reading_remotely ? 0 : RL_DUMP_COMMENTS)
@@ -1993,7 +2089,7 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 	rprintf(FLOG, "building file list\n");
 	if (show_filelist_p())
 		start_filelist_progress("building file list");
-	else if (inc_recurse && verbose && !am_server)
+	else if (inc_recurse && INFO_GTE(FLIST, 1) && !am_server)
 		rprintf(FCLIENT, "sending incremental file list\n");
 
 	start_write = stats.total_written;
@@ -2020,6 +2116,12 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 			rsyserr(FERROR_XFER, errno, "change_dir %s failed",
 				full_fname(argv[0]));
 			exit_cleanup(RERR_FILESELECT);
+		}
+		if (protocol_version < 31) {
+			/* Older protocols send the files-from data w/o packaging
+			 * it in multiplexed I/O packets, so temporarily switch
+			 * to buffered I/O to match this behavior. */
+			reenable_multiplex = io_end_multiplex_in(MPLX_TO_BUFFERED);
 		}
 		use_ff_fd = 1;
 	}
@@ -2162,14 +2264,26 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 		if (link_stat(fbuf, &st, copy_dirlinks || name_type != NORMAL_NAME) != 0
 		 || (name_type != DOTDIR_NAME && is_daemon_excluded(fbuf, S_ISDIR(st.st_mode)))
 		 || (relative_paths && path_is_daemon_excluded(fbuf, 1))) {
-			io_error |= IOERR_GENERAL;
-			rsyserr(FERROR_XFER, errno, "link_stat %s failed",
-				full_fname(fbuf));
-			continue;
+			if (errno != ENOENT || missing_args == 0) {
+				/* This is a transfer error, but inhibit deletion
+				 * only if we might be omitting an existing file. */
+				if (errno != ENOENT)
+					io_error |= IOERR_GENERAL;
+				rsyserr(FERROR_XFER, errno, "link_stat %s failed",
+					full_fname(fbuf));
+				continue;
+			} else if (missing_args == 1) {
+				/* Just ignore the arg. */
+				continue;
+			} else /* (missing_args == 2) */ {
+				/* Send the arg as a "missing" entry with
+				 * mode 0, which tells the generator to delete it. */
+				memset(&st, 0, sizeof st);
+			}
 		}
 
 		/* A dot-dir should not be excluded! */
-		if (name_type != DOTDIR_NAME
+		if (name_type != DOTDIR_NAME && st.st_mode != 0
 		 && is_excluded(fbuf, S_ISDIR(st.st_mode) != 0, ALL_FILTERS))
 			continue;
 
@@ -2185,7 +2299,8 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 						p = fn;
 				} else
 					fn = p;
-				send_implied_dirs(f, flist, fbuf, fbuf, p, flags, name_type);
+				send_implied_dirs(f, flist, fbuf, fbuf, p, flags,
+						  IS_MISSING_FILE(st) ? MISSING_NAME : name_type);
 				if (fn == p)
 					continue;
 			}
@@ -2218,6 +2333,9 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 		} else
 			send_file_name(f, flist, fbuf, &st, flags, NO_FILTERS);
 	}
+
+	if (reenable_multiplex >= 0)
+		io_start_multiplex_in(reenable_multiplex);
 
 	gettimeofday(&end_tv, NULL);
 	stats.flist_buildtime = (int64)(end_tv.tv_sec - start_tv.tv_sec) * 1000
@@ -2267,11 +2385,10 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 		flist->sorted = flist->files;
 	flist_sort_and_clean(flist, 0);
 	file_total += flist->used;
+	file_old_total += flist->used;
 
 	if (numeric_ids <= 0 && !inc_recurse)
 		send_id_list(f);
-
-	set_msg_fd_in(-1);
 
 	/* send the io_error flag */
 	if (protocol_version < 30)
@@ -2280,26 +2397,28 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 		send_msg_int(MSG_IO_ERROR, io_error);
 
 	if (disable_buffering)
-		io_end_buffering_out();
+		io_end_buffering_out(IOBUF_FREE_BUFS);
 
 	stats.flist_size = stats.total_written - start_write;
 	stats.num_files = flist->used;
 
-	if (verbose > 3)
+	if (DEBUG_GTE(FLIST, 3))
 		output_flist(flist);
 
-	if (verbose > 2)
+	if (DEBUG_GTE(FLIST, 2))
 		rprintf(FINFO, "send_file_list done\n");
 
 	if (inc_recurse) {
 		send_dir_depth = 1;
-		add_dirs_to_tree(-1, flist, dir_count);
+		add_dirs_to_tree(-1, flist, stats.num_dirs);
 		if (!file_total || strcmp(flist->sorted[flist->low]->basename, ".") != 0)
 			flist->parent_ndx = -1;
 		flist_done_allocating(flist);
 		if (send_dir_ndx < 0) {
 			write_ndx(f, NDX_FLIST_EOF);
 			flist_eof = 1;
+			if (DEBUG_GTE(FLIST, 3))
+				rprintf(FINFO, "[%s] flist_eof=1\n", who_am_i());
 		}
 		else if (file_total == 1) {
 			/* If we're creating incremental file-lists and there
@@ -2307,24 +2426,33 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 			 * file-list to check if this is a 1-file xfer. */
 			send_extra_file_list(f, 1);
 		}
+	} else {
+		flist_eof = 1;
+		if (DEBUG_GTE(FLIST, 3))
+			rprintf(FINFO, "[%s] flist_eof=1\n", who_am_i());
 	}
 
 	return flist;
 }
 
-struct file_list *recv_file_list(int f)
+struct file_list *recv_file_list(int f, int dir_ndx)
 {
+	const char *good_dirname = NULL;
 	struct file_list *flist;
 	int dstart, flags;
 	int64 start_read;
-	int save_verbose = verbose;
 
-	if (!first_flist)
+	if (!first_flist) {
+		if (show_filelist_p())
+			start_filelist_progress("receiving file list");
+		else if (inc_recurse && INFO_GTE(FLIST, 1) && !am_server)
+			rprintf(FCLIENT, "receiving incremental file list\n");
 		rprintf(FLOG, "receiving file list\n");
-	if (show_filelist_p())
-		start_filelist_progress("receiving file list");
-	else if (inc_recurse && verbose && !am_server && !first_flist)
-		rprintf(FCLIENT, "receiving incremental file list\n");
+		if (usermap)
+			parse_name_map(usermap, True);
+		if (groupmap)
+			parse_name_map(groupmap, False);
+	}
 
 	start_read = stats.total_read;
 
@@ -2344,8 +2472,6 @@ struct file_list *recv_file_list(int f)
 		dstart = 0;
 	}
 
-	if (am_server && verbose > 2)
-		verbose = 2;
 	while ((flags = read_byte(f)) != 0) {
 		struct file_struct *file;
 
@@ -2367,24 +2493,50 @@ struct file_list *recv_file_list(int f)
 		flist_expand(flist, 1);
 		file = recv_file_entry(f, flist, flags);
 
-		if (inc_recurse && S_ISDIR(file->mode)) {
-			flist_expand(dir_flist, 1);
-			dir_flist->files[dir_flist->used++] = file;
+		if (inc_recurse) {
+			static const char empty_dir[] = "\0";
+			const char *cur_dir = file->dirname ? file->dirname : empty_dir;
+			if (relative_paths && *cur_dir == '/')
+				cur_dir++;
+			if (cur_dir != good_dirname) {
+				const char *d = dir_ndx >= 0 ? f_name(dir_flist->files[dir_ndx], NULL) : empty_dir;
+				if (strcmp(cur_dir, d) != 0) {
+					rprintf(FERROR,
+						"ABORTING due to invalid path from sender: %s/%s\n",
+						cur_dir, file->basename);
+					exit_cleanup(RERR_PROTOCOL);
+				}
+				good_dirname = cur_dir;
+			}
 		}
+
+		if (S_ISREG(file->mode)) {
+			/* Already counted */
+		} else if (S_ISDIR(file->mode)) {
+			if (inc_recurse) {
+				flist_expand(dir_flist, 1);
+				dir_flist->files[dir_flist->used++] = file;
+			}
+			stats.num_dirs++;
+		} else if (S_ISLNK(file->mode))
+			stats.num_symlinks++;
+		else if (IS_DEVICE(file->mode))
+			stats.num_symlinks++;
+		else
+			stats.num_specials++;
 
 		flist->files[flist->used++] = file;
 
 		maybe_emit_filelist_progress(flist->used);
 
-		if (verbose > 2) {
+		if (DEBUG_GTE(FLIST, 2)) {
 			char *name = f_name(file, NULL);
 			rprintf(FINFO, "recv_file_name(%s)\n", NS(name));
 		}
 	}
 	file_total += flist->used;
-	verbose = save_verbose;
 
-	if (verbose > 2)
+	if (DEBUG_GTE(FLIST, 2))
 		rprintf(FINFO, "received %d names\n", flist->used);
 
 	if (show_filelist_p())
@@ -2422,26 +2574,32 @@ struct file_list *recv_file_list(int f)
 
 	if (inc_recurse)
 		flist_done_allocating(flist);
-	else if (f >= 0)
+	else if (f >= 0) {
 		recv_id_list(f, flist);
+		flist_eof = 1;
+		if (DEBUG_GTE(FLIST, 3))
+			rprintf(FINFO, "[%s] flist_eof=1\n", who_am_i());
+	}
 
+	/* The --relative option sends paths with a leading slash, so we need
+	 * to specify the strip_root option here.  We rejected leading slashes
+	 * for a non-relative transfer in recv_file_entry(). */
 	flist_sort_and_clean(flist, relative_paths);
 
 	if (protocol_version < 30) {
 		/* Recv the io_error flag */
-		if (ignore_errors)
-			read_int(f);
-		else
-			io_error |= read_int(f);
+		int err = read_int(f);
+		if (!ignore_errors)
+			io_error |= err;
 	} else if (inc_recurse && flist->ndx_start == 1) {
 		if (!file_total || strcmp(flist->sorted[flist->low]->basename, ".") != 0)
 			flist->parent_ndx = -1;
 	}
 
-	if (verbose > 3)
+	if (DEBUG_GTE(FLIST, 3))
 		output_flist(flist);
 
-	if (verbose > 2)
+	if (DEBUG_GTE(FLIST, 2))
 		rprintf(FINFO, "recv_file_list done\n");
 
 	stats.flist_size += stats.total_read - start_read;
@@ -2458,6 +2616,8 @@ void recv_additional_file_list(int f)
 	int ndx = read_ndx(f);
 	if (ndx == NDX_FLIST_EOF) {
 		flist_eof = 1;
+		if (DEBUG_GTE(FLIST, 3))
+			rprintf(FINFO, "[%s] flist_eof=1\n", who_am_i());
 		change_local_filter_dir(NULL, 0, 0);
 	} else {
 		ndx = NDX_FLIST_OFFSET - ndx;
@@ -2469,11 +2629,11 @@ void recv_additional_file_list(int f)
 				NDX_FLIST_OFFSET - dir_flist->used + 1);
 			exit_cleanup(RERR_PROTOCOL);
 		}
-		if (verbose > 3) {
+		if (DEBUG_GTE(FLIST, 3)) {
 			rprintf(FINFO, "[%s] receiving flist for dir %d\n",
 				who_am_i(), ndx);
 		}
-		flist = recv_file_list(f);
+		flist = recv_file_list(f, ndx);
 		flist->parent_ndx = ndx;
 	}
 }
@@ -2529,6 +2689,34 @@ int flist_find(struct file_list *flist, struct file_struct *f)
 	return -1;
 }
 
+/* Search for a name in the file list.  You must specify want_dir_match as:
+ * 1=match directories, 0=match non-directories, or -1=match either. */
+int flist_find_name(struct file_list *flist, const char *fname, int want_dir_match)
+{
+	struct { /* We have to create a temporary file_struct for the search. */
+		struct file_struct f;
+		char name_space[MAXPATHLEN];
+	} t;
+	char fbuf[MAXPATHLEN];
+	const char *slash = strrchr(fname, '/');
+	const char *basename = slash ? slash+1 : fname;
+
+	memset(&t.f, 0, FILE_STRUCT_LEN);
+	memcpy((void *)t.f.basename, basename, strlen(basename)+1);
+
+	if (slash) {
+		strlcpy(fbuf, fname, slash - fname + 1);
+		t.f.dirname = fbuf;
+	} else
+		t.f.dirname = NULL;
+
+	t.f.mode = want_dir_match > 0 ? S_IFDIR : S_IFREG;
+
+	if (want_dir_match < 0)
+		return flist_find_ignore_dirness(flist, &t.f);
+	return flist_find(flist, &t.f);
+}
+
 /* Search for an identically-named item in the file list.  Differs from
  * flist_find in that an item that agrees with "f" in directory-ness is
  * preferred but one that does not is still found. */
@@ -2576,14 +2764,16 @@ struct file_list *flist_new(int flags, char *msg)
 
 	if (flags & FLIST_TEMP) {
 		if (!(flist->file_pool = pool_create(SMALL_EXTENT, 0,
-						out_of_memory, POOL_INTERN)))
+						     out_of_memory,
+						     POOL_INTERN)))
 			out_of_memory(msg);
 	} else {
 		/* This is a doubly linked list with prev looping back to
 		 * the end of the list, but the last next pointer is NULL. */
 		if (!first_flist) {
 			flist->file_pool = pool_create(NORMAL_EXTENT, 0,
-						out_of_memory, POOL_INTERN);
+						       out_of_memory,
+						       POOL_INTERN);
 			if (!flist->file_pool)
 				out_of_memory(msg);
 
@@ -2713,7 +2903,7 @@ static void flist_sort_and_clean(struct file_list *flist, int strip_root)
 				keep = j, drop = i;
 
 			if (!am_sender) {
-				if (verbose > 1) {
+				if (DEBUG_GTE(DUP, 1)) {
 					rprintf(FINFO,
 					    "removing duplicate name %s from file list (%d)\n",
 					    f_name(file, fbuf), drop + flist->ndx_start);
@@ -2854,10 +3044,10 @@ static void output_flist(struct file_list *flist)
 		} else
 			root = dir = slash = name = trail = "";
 		rprintf(FINFO,
-			"[%s] i=%d %s %s%s%s%s mode=0%o len=%.0f%s%s flags=%x\n",
+			"[%s] i=%d %s %s%s%s%s mode=0%o len=%s%s%s flags=%x\n",
 			who, i + flist->ndx_start,
 			root, dir, slash, name, trail,
-			(int)file->mode, (double)F_LENGTH(file),
+			(int)file->mode, comma_num(F_LENGTH(file)),
 			uidbuf, gidbuf, file->flags);
 	}
 }
@@ -3072,7 +3262,7 @@ struct file_list *get_dirlist(char *dirname, int dlen, int flags)
 	send_directory(senddir_fd, dirlist, dirname, dlen, FLAG_CONTENT_DIR);
 	xfer_dirs = save_xfer_dirs;
 	recurse = save_recurse;
-	if (do_progress)
+	if (INFO_GTE(PROGRESS, 1))
 		flist_count_offset += dirlist->used;
 
 	prune_empty_dirs = 0;
@@ -3080,7 +3270,7 @@ struct file_list *get_dirlist(char *dirname, int dlen, int flags)
 	flist_sort_and_clean(dirlist, 0);
 	prune_empty_dirs = save_prune_empty_dirs;
 
-	if (verbose > 3)
+	if (DEBUG_GTE(FLIST, 3))
 		output_flist(dirlist);
 
 	return dirlist;

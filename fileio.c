@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1998 Andrew Tridgell
  * Copyright (C) 2002 Martin Pool
- * Copyright (C) 2004-2009 Wayne Davison
+ * Copyright (C) 2004-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,10 +20,18 @@
  */
 
 #include "rsync.h"
+#include "inums.h"
 
 #ifndef ENODATA
 #define ENODATA EAGAIN
 #endif
+
+/* We want all reads to be aligned on 1K boundries. */
+#define ALIGN_BOUNDRY 1024
+/* How far past the boundary is an offset? */
+#define ALIGNED_OVERSHOOT(oft) ((oft) & (ALIGN_BOUNDRY-1))
+/* Round up a length to the next boundary */
+#define ALIGNED_LENGTH(len) ((((len) - 1) | (ALIGN_BOUNDRY-1)) + 1)
 
 extern int sparse_files;
 
@@ -76,11 +84,14 @@ static int write_sparse(int f, char *buf, int len)
 	while ((ret = bpc_write(f, buf + l1, len - (l1+l2))) <= 0) {
 		if (ret < 0 && errno == EINTR)
 			continue;
+		sparse_seek = 0;
 		return ret;
 	}
 
-	if (ret != (int)(len - (l1+l2)))
+	if (ret != (int)(len - (l1+l2))) {
+		sparse_seek = 0;
 		return l1+ret;
+	}
 
 	return len;
 }
@@ -158,8 +169,7 @@ int write_file(int f, char *buf, int len)
  * It gives sliding window access to a file.  mmap() is not used because of
  * the possibility of another program (such as a mailer) truncating the
  * file thus giving us a SIGBUS. */
-struct map_struct *map_file(int fd, OFF_T len, int32 read_size,
-			    int32 blk_size)
+struct map_struct *map_file(int fd, OFF_T len, int32 read_size, int32 blk_size)
 {
 	struct map_struct *map;
 
@@ -171,7 +181,7 @@ struct map_struct *map_file(int fd, OFF_T len, int32 read_size,
 
 	map->fd = fd;
 	map->file_size = len;
-	map->def_window_size = read_size;
+	map->def_window_size = ALIGNED_LENGTH(read_size);
 
 	return map;
 }
@@ -180,9 +190,8 @@ struct map_struct *map_file(int fd, OFF_T len, int32 read_size,
 /* slide the read window in the file */
 char *map_ptr(struct map_struct *map, OFF_T offset, int32 len)
 {
-	int32 nread;
 	OFF_T window_start, read_start;
-	int32 window_size, read_size, read_offset;
+	int32 window_size, read_size, read_offset, align_fudge;
 
 	if (len == 0)
 		return NULL;
@@ -197,12 +206,13 @@ char *map_ptr(struct map_struct *map, OFF_T offset, int32 len)
 		return map->p + (offset - map->p_offset);
 
 	/* nope, we are going to have to do a read. Work out our desired window */
-	window_start = offset;
+	align_fudge = (int32)ALIGNED_OVERSHOOT(offset);
+	window_start = offset - align_fudge;
 	window_size = map->def_window_size;
 	if (window_start + window_size > map->file_size)
 		window_size = (int32)(map->file_size - window_start);
-	if (len > window_size)
-		window_size = len;
+	if (window_size < len + align_fudge)
+		window_size = ALIGNED_LENGTH(len + align_fudge);
 
 	/* make sure we have allocated enough memory for the window */
 	if (window_size > map->p_size) {
@@ -212,11 +222,9 @@ char *map_ptr(struct map_struct *map, OFF_T offset, int32 len)
 		map->p_size = window_size;
 	}
 
-	/* Now try to avoid re-reading any bytes by reusing any bytes
-	 * from the previous buffer. */
-	if (window_start >= map->p_offset &&
-	    window_start < map->p_offset + map->p_len &&
-	    window_start + window_size >= map->p_offset + map->p_len) {
+	/* Now try to avoid re-reading any bytes by reusing any bytes from the previous buffer. */
+	if (window_start >= map->p_offset && window_start < map->p_offset + map->p_len
+	 && window_start + window_size >= map->p_offset + map->p_len) {
 		read_start = map->p_offset + map->p_len;
 		read_offset = (int32)(read_start - window_start);
 		read_size = window_size - read_offset;
@@ -236,8 +244,8 @@ char *map_ptr(struct map_struct *map, OFF_T offset, int32 len)
 	if (map->p_fd_offset != read_start) {
 		OFF_T ret = do_lseek(map->fd, read_start, SEEK_SET);
 		if (ret != read_start) {
-			rsyserr(FERROR, errno, "lseek returned %.0f, not %.0f",
-				(double)ret, (double)read_start);
+			rsyserr(FERROR, errno, "lseek returned %s, not %s",
+				big_num(ret), big_num(read_start));
 			exit_cleanup(RERR_FILEIO);
 		}
 		map->p_fd_offset = read_start;
@@ -246,7 +254,7 @@ char *map_ptr(struct map_struct *map, OFF_T offset, int32 len)
 	map->p_len = window_size;
 
 	while (read_size > 0) {
-		nread = bpc_read(map->fd, map->p + read_offset, read_size);
+		int32 nread = bpc_read(map->fd, map->p + read_offset, read_size);
 		if (nread <= 0) {
 			if (!map->status)
 				map->status = nread ? errno : ENODATA;
@@ -260,7 +268,7 @@ char *map_ptr(struct map_struct *map, OFF_T offset, int32 len)
 		read_size -= nread;
 	}
 
-	return map->p;
+	return map->p + align_fudge;
 }
 
 

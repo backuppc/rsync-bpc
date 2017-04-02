@@ -3,7 +3,7 @@
  * functions, so that module test harnesses can run standalone.
  *
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,16 +22,18 @@
 #include "rsync.h"
 
 int modify_window = 0;
+int preallocate_files = 0;
+int protect_args = 0;
 int module_id = -1;
+int checksum_len = 0;
 int relative_paths = 0;
-int human_readable = 0;
 int module_dirlen = 0;
+int preserve_acls = 0;
 int preserve_times = 0;
 int preserve_xattrs = 0;
-mode_t orig_umask = 002;
 char *partial_dir;
 char *module_dir;
-struct filter_list_struct daemon_filter_list;
+filter_rule_list daemon_filter_list;
 
  void rprintf(UNUSED(enum logcode code), const char *format, ...)
 {
@@ -58,7 +60,7 @@ struct filter_list_struct daemon_filter_list;
 	exit(code);
 }
 
- int check_filter(UNUSED(struct filter_list_struct *listp), UNUSED(enum logcode code),
+ int check_filter(UNUSED(filter_rule_list *listp), UNUSED(enum logcode code),
 		  UNUSED(const char *name), UNUSED(int name_is_dir))
 {
 	/* This function doesn't really get called in this test context, so
@@ -66,14 +68,19 @@ struct filter_list_struct daemon_filter_list;
 	return 0;
 }
 
- int make_bak_dir(UNUSED(const char *fullpath))
+ int copy_xattrs(UNUSED(const char *source), UNUSED(const char *dest))
 {
 	return -1;
 }
 
- int copy_xattrs(UNUSED(const char *source), UNUSED(const char *dest))
+ void free_xattr(UNUSED(stat_x *sxp))
 {
-	return -1;
+	return;
+}
+
+ void free_acl(UNUSED(stat_x *sxp))
+{
+	return;
 }
 
  char *lp_name(UNUSED(int mod))

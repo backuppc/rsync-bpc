@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,7 +27,6 @@
 #include <langinfo.h>
 #endif
 
-extern int verbose;
 extern int dry_run;
 extern int preserve_acls;
 extern int preserve_xattrs;
@@ -36,15 +35,18 @@ extern int preserve_executability;
 extern int preserve_times;
 extern int am_root;
 extern int am_server;
+extern int am_daemon;
 extern int am_sender;
 extern int am_receiver;
 extern int am_generator;
 extern int am_starting_up;
 extern int allow_8bit_chars;
 extern int protocol_version;
+extern int got_kill_signal;
 extern int inc_recurse;
 extern int inplace;
 extern int flist_eof;
+extern int file_old_total;
 extern int keep_dirlinks;
 extern int make_backups;
 extern struct file_list *cur_flist, *first_flist, *dir_flist;
@@ -82,19 +84,20 @@ void setup_iconv(void)
 		/* It's OK if this fails... */
 		ic_chck = iconv_open(defset, defset);
 
-		if (verbose > 3) {
+		if (DEBUG_GTE(ICONV, 2)) {
 			if (ic_chck == (iconv_t)-1) {
 				rprintf(FINFO,
-					"note: iconv_open(\"%s\", \"%s\") failed (%d)"
-					" -- using isprint() instead of iconv().\n",
+					"msg checking via isprint()"
+					" (iconv_open(\"%s\", \"%s\") errno: %d)\n",
 					defset, defset, errno);
 			} else {
 				rprintf(FINFO,
-					"note: iconv_open(\"%s\", \"%s\") succeeded.\n",
-					defset, defset);
+					"msg checking charset: %s\n",
+					defset);
 			}
 		}
-	}
+	} else
+		ic_chck = (iconv_t)-1;
 
 # ifdef ICONV_OPTION
 	if (!iconv_opt)
@@ -124,47 +127,82 @@ void setup_iconv(void)
 		exit_cleanup(RERR_UNSUPPORTED);
 	}
 
-	if (verbose > 1) {
-		rprintf(FINFO, "%s charset: %s\n",
-			am_server ? "server" : "client",
-			*charset ? charset : "[LOCALE]");
+	if (DEBUG_GTE(ICONV, 1)) {
+		rprintf(FINFO, "[%s] charset: %s\n",
+			who_am_i(), *charset ? charset : "[LOCALE]");
 	}
 # endif
 }
 
-/* This function converts the characters in the "in" xbuf into characters
- * in the "out" xbuf.  The "len" of the "in" xbuf is used starting from its
- * "pos".  The "size" of the "out" xbuf restricts how many characters can be
- * stored, starting at its "pos+len" position.  Note that the last byte of
- * the buffer is never used, which reserves space for a terminating '\0'.
+/* This function converts the chars in the "in" xbuf into characters in the
+ * "out" xbuf.  The ".len" chars of the "in" xbuf is used starting from its
+ * ".pos".  The ".size" of the "out" xbuf restricts how many characters can
+ * be stored, starting at its ".pos+.len" position.  Note that the last byte
+ * of the "out" xbuf is not used, which reserves space for a trailing '\0'
+ * (though it is up to the caller to store a trailing '\0', as needed).
+ *
  * We return a 0 on success or a -1 on error.  An error also sets errno to
  * E2BIG, EILSEQ, or EINVAL (see below); otherwise errno will be set to 0.
- * The "in" xbuf is altered to update "pos" and "len".  The "out" xbuf has
- * data appended, and its "len" incremented.   If ICB_EXPAND_OUT is set in
- * "flags", the "out" xbuf will also be allocated if empty, and expanded if
- * too small (so E2BIG will not be returned).  If ICB_INCLUDE_BAD is set in
- * "flags", any badly-encoded chars are included verbatim in the "out" xbuf,
- * so EILSEQ will not be returned.  Likewise for ICB_INCLUDE_INCOMPLETE with
- * respect to an incomplete multi-byte char at the end, which ensures that
- * EINVAL is not returned.  Anytime "in.pos" is 0 we will reset the iconv()
- * state prior to processing the characters. */
+ * The "in" xbuf is altered to update ".pos" and ".len".  The "out" xbuf has
+ * data appended, and its ".len" incremented (see below for a ".size" note).
+ *
+ * If ICB_CIRCULAR_OUT is set in "flags", the chars going into the "out" xbuf
+ * can wrap around to the start, and the xbuf may have its ".size" reduced
+ * (presumably by 1 byte) if the iconv code doesn't have space to store a
+ * multi-byte character at the physical end of the ".buf" (though no reducing
+ * happens if ".pos" is <= 1, since there is no room to wrap around).
+ *
+ * If ICB_EXPAND_OUT is set in "flags", the "out" xbuf will be allocated if
+ * empty, and (as long as ICB_CIRCULAR_OUT is not set) expanded if too small.
+ * This prevents the return of E2BIG (except for a circular xbuf).
+ *
+ * If ICB_INCLUDE_BAD is set in "flags", any badly-encoded chars are included
+ * verbatim in the "out" xbuf, so EILSEQ will not be returned.
+ *
+ * If ICB_INCLUDE_INCOMPLETE is set in "flags", any incomplete multi-byte
+ * chars are included, which ensures that EINVAL is not returned.
+ *
+ * If ICB_INIT is set, the iconv() conversion state is initialized prior to
+ * processing the characters. */
 int iconvbufs(iconv_t ic, xbuf *in, xbuf *out, int flags)
 {
 	ICONV_CONST char *ibuf;
-	size_t icnt, ocnt;
+	size_t icnt, ocnt, opos;
 	char *obuf;
 
-	if (!out->size && flags & ICB_EXPAND_OUT)
-		alloc_xbuf(out, 1024);
+	if (!out->size && flags & ICB_EXPAND_OUT) {
+		size_t siz = ROUND_UP_1024(in->len * 2);
+		alloc_xbuf(out, siz);
+	} else if (out->len+1 >= out->size) {
+		/* There is no room to even start storing data. */
+		if (!(flags & ICB_EXPAND_OUT) || flags & ICB_CIRCULAR_OUT) {
+			errno = E2BIG;
+			return -1;
+		}
+		realloc_xbuf(out, out->size + ROUND_UP_1024(in->len * 2));
+	}
 
-	if (!in->pos)
+	if (flags & ICB_INIT)
 		iconv(ic, NULL, 0, NULL, 0);
 
 	ibuf = in->buf + in->pos;
 	icnt = in->len;
 
-	obuf = out->buf + (out->pos + out->len);
-	ocnt = out->size - (out->pos + out->len) - 1;
+	opos = out->pos + out->len;
+	if (flags & ICB_CIRCULAR_OUT) {
+		if (opos >= out->size) {
+			opos -= out->size;
+			/* We know that out->pos is not 0 due to the "no room" check
+			 * above, so this can't go "negative". */
+			ocnt = out->pos - opos - 1;
+		} else {
+			/* Allow the use of all bytes to the physical end of the buffer
+			 * unless pos is 0, in which case we reserve our trailing '\0'. */
+			ocnt = out->size - opos - (out->pos ? 0 : 1);
+		}
+	} else
+		ocnt = out->size - opos - 1;
+	obuf = out->buf + opos;
 
 	while (icnt) {
 		while (iconv(ic, &ibuf, &icnt, &obuf, &ocnt) == (size_t)-1) {
@@ -173,31 +211,58 @@ int iconvbufs(iconv_t ic, xbuf *in, xbuf *out, int flags)
 			if (errno == EINVAL) {
 				if (!(flags & ICB_INCLUDE_INCOMPLETE))
 					goto finish;
+				if (!ocnt)
+					goto e2big;
 			} else if (errno == EILSEQ) {
 				if (!(flags & ICB_INCLUDE_BAD))
 					goto finish;
-			} else {
-				size_t opos = obuf - out->buf;
-				if (!(flags & ICB_EXPAND_OUT)) {
+				if (!ocnt)
+					goto e2big;
+			} else if (errno == E2BIG) {
+				size_t siz;
+			  e2big:
+				opos = obuf - out->buf;
+				if (flags & ICB_CIRCULAR_OUT && out->pos > 1 && opos > out->pos) {
+					/* We are in a divided circular buffer at the physical
+					 * end with room to wrap to the start.  If iconv() refused
+					 * to use one or more trailing bytes in the buffer, we
+					 * set the size to ignore the unused bytes. */
+					if (opos < out->size)
+						reduce_iobuf_size(out, opos);
+					obuf = out->buf;
+					ocnt = out->pos - 1;
+					continue;
+				}
+				if (!(flags & ICB_EXPAND_OUT) || flags & ICB_CIRCULAR_OUT) {
 					errno = E2BIG;
 					goto finish;
 				}
-				realloc_xbuf(out, out->size + 1024);
+				siz = ROUND_UP_1024(in->len * 2);
+				realloc_xbuf(out, out->size + siz);
 				obuf = out->buf + opos;
-				ocnt += 1024;
+				ocnt += siz;
 				continue;
+			} else {
+				rsyserr(FERROR, errno, "unexpected error from iconv()");
+				exit_cleanup(RERR_UNSUPPORTED);
 			}
 			*obuf++ = *ibuf++;
 			ocnt--, icnt--;
+			if (!icnt)
+				break;
 		}
 	}
 
 	errno = 0;
 
   finish:
+	opos = obuf - out->buf;
+	if (flags & ICB_CIRCULAR_OUT && opos < out->pos)
+		opos += out->size;
+	out->len = opos - out->pos;
+
 	in->len = icnt;
 	in->pos = ibuf - in->buf;
-	out->len = obuf - out->buf - out->pos;
 
 	return errno ? -1 : 0;
 }
@@ -216,7 +281,7 @@ void send_protected_args(int fd, char *args[])
 
 	for (i = 0; args[i]; i++) {} /* find first NULL */
 	args[i] = "rsync"; /* set a new arg0 */
-	if (verbose > 1)
+	if (DEBUG_GTE(CMD, 1))
 		print_child_argv("protected args:", args + i + 1);
 	do {
 		if (!args[i][0])
@@ -225,7 +290,7 @@ void send_protected_args(int fd, char *args[])
 		else if (convert) {
 			INIT_XBUF_STRLEN(inbuf, args[i]);
 			iconvbufs(ic_send, &inbuf, &outbuf,
-				  ICB_EXPAND_OUT | ICB_INCLUDE_BAD | ICB_INCLUDE_INCOMPLETE);
+				  ICB_EXPAND_OUT | ICB_INCLUDE_BAD | ICB_INCLUDE_INCOMPLETE | ICB_INIT);
 			outbuf.buf[outbuf.len] = '\0';
 			write_buf(fd, outbuf.buf, outbuf.len + 1);
 			outbuf.len = 0;
@@ -242,13 +307,13 @@ void send_protected_args(int fd, char *args[])
 #endif
 }
 
-int read_ndx_and_attrs(int f_in, int *iflag_ptr, uchar *type_ptr,
+int read_ndx_and_attrs(int f_in, int f_out, int *iflag_ptr, uchar *type_ptr,
 		       char *buf, int *len_ptr)
 {
 	int len, iflags = 0;
 	struct file_list *flist;
 	uchar fnamecmp_type = FNAMECMP_FNAME;
-	int ndx, save_verbose = verbose;
+	int ndx;
 
   read_loop:
 	while (1) {
@@ -258,6 +323,12 @@ int read_ndx_and_attrs(int f_in, int *iflag_ptr, uchar *type_ptr,
 			break;
 		if (ndx == NDX_DONE)
 			return ndx;
+		if (ndx == NDX_DEL_STATS) {
+			read_del_stats(f_in);
+			if (am_sender && am_server)
+				write_del_stats(f_out);
+			continue;
+		}
 		if (!inc_recurse || am_sender) {
 			int last;
 			if (first_flist)
@@ -271,7 +342,9 @@ int read_ndx_and_attrs(int f_in, int *iflag_ptr, uchar *type_ptr,
 		}
 		if (ndx == NDX_FLIST_EOF) {
 			flist_eof = 1;
-			send_msg(MSG_FLIST_EOF, "", 0, 0);
+			if (DEBUG_GTE(FLIST, 3))
+				rprintf(FINFO, "[%s] flist_eof=1\n", who_am_i());
+			write_int(f_out, NDX_FLIST_EOF);
 			continue;
 		}
 		ndx = NDX_FLIST_OFFSET - ndx;
@@ -285,18 +358,15 @@ int read_ndx_and_attrs(int f_in, int *iflag_ptr, uchar *type_ptr,
 			exit_cleanup(RERR_PROTOCOL);
 		}
 
-		/* Send everything read from f_in to msg_fd_out. */
-		if (verbose > 3) {
+		if (DEBUG_GTE(FLIST, 2)) {
 			rprintf(FINFO, "[%s] receiving flist for dir %d\n",
 				who_am_i(), ndx);
 		}
-		verbose = 0;
-		send_msg_int(MSG_FLIST, ndx);
-		start_flist_forward(f_in);
-		flist = recv_file_list(f_in);
+		/* Send all the data we read for this flist to the generator. */
+		start_flist_forward(ndx);
+		flist = recv_file_list(f_in, ndx);
 		flist->parent_ndx = ndx;
 		stop_flist_forward();
-		verbose = save_verbose;
 	}
 
 	iflags = protocol_version >= 29 ? read_shortint(f_in)
@@ -305,11 +375,19 @@ int read_ndx_and_attrs(int f_in, int *iflag_ptr, uchar *type_ptr,
 	/* Support the protocol-29 keep-alive style. */
 	if (protocol_version < 30 && ndx == cur_flist->used && iflags == ITEM_IS_NEW) {
 		if (am_sender)
-			maybe_send_keepalive();
+			maybe_send_keepalive(time(NULL), MSK_ALLOW_FLUSH);
 		goto read_loop;
 	}
 
-	cur_flist = flist_for_ndx(ndx, "read_ndx_and_attrs");
+	flist = flist_for_ndx(ndx, "read_ndx_and_attrs");
+	if (flist != cur_flist) {
+		cur_flist = flist;
+		if (am_sender) {
+			file_old_total = cur_flist->used;
+			for (flist = first_flist; flist != cur_flist; flist = flist->next)
+				file_old_total += flist->used;
+		}
+	}
 
 	if (iflags & ITEM_BASIS_TYPE_FOLLOWS)
 		fnamecmp_type = read_byte(f_in);
@@ -391,12 +469,7 @@ int set_file_attrs(const char *fname, struct file_struct *file, stat_x *sxp,
 				full_fname(fname));
 			return 0;
 		}
-#ifdef SUPPORT_ACLS
-		sx2.acc_acl = sx2.def_acl = NULL;
-#endif
-#ifdef SUPPORT_XATTRS
-		sx2.xattr = NULL;
-#endif
+		init_stat_x(&sx2);
 		sxp = &sx2;
 		inherit = !preserve_perms;
 	} else
@@ -416,31 +489,6 @@ int set_file_attrs(const char *fname, struct file_struct *file, stat_x *sxp,
 		get_acl(fname, sxp);
 #endif
 
-#ifdef SUPPORT_XATTRS
-	if (am_root < 0)
-		set_stat_xattr(fname, file, new_mode);
-	if (preserve_xattrs && fnamecmp)
-		set_xattr(fname, file, fnamecmp, sxp);
-#endif
-
-	if (!preserve_times
-	 || (!(preserve_times & PRESERVE_DIR_TIMES) && S_ISDIR(sxp->st.st_mode))
-	 || (!(preserve_times & PRESERVE_LINK_TIMES) && S_ISLNK(sxp->st.st_mode)))
-		flags |= ATTRS_SKIP_MTIME;
-	if (!(flags & ATTRS_SKIP_MTIME)
-	    && cmp_time(sxp->st.st_mtime, file->modtime) != 0) {
-		int ret = set_modtime(fname, file->modtime, sxp->st.st_mode);
-		if (ret < 0) {
-			rsyserr(FERROR_XFER, errno, "failed to set times on %s",
-				full_fname(fname));
-			goto cleanup;
-		}
-		if (ret == 0) /* ret == 1 if symlink could not be set */
-			updated = 1;
-		else
-			file->flags |= FLAG_TIME_FAILED;
-	}
-
 	change_uid = am_root && uid_ndx && sxp->st.st_uid != (uid_t)F_OWNER(file);
 	change_gid = gid_ndx && !(file->flags & FLAG_SKIP_GROUP)
 		  && sxp->st.st_gid != (gid_t)F_GROUP(file);
@@ -450,7 +498,7 @@ int set_file_attrs(const char *fname, struct file_struct *file, stat_x *sxp,
 	} else
 #endif
 	if (change_uid || change_gid) {
-		if (verbose > 2) {
+		if (DEBUG_GTE(OWN, 1)) {
 			if (change_uid) {
 				rprintf(FINFO,
 					"set uid of %s from %u to %u\n",
@@ -490,6 +538,35 @@ int set_file_attrs(const char *fname, struct file_struct *file, stat_x *sxp,
 		updated = 1;
 	}
 
+#ifdef SUPPORT_XATTRS
+	if (am_root < 0)
+		set_stat_xattr(fname, file, new_mode);
+	if (preserve_xattrs && fnamecmp)
+		set_xattr(fname, file, fnamecmp, sxp);
+#endif
+
+	if (!preserve_times
+	 || (!(preserve_times & PRESERVE_DIR_TIMES) && S_ISDIR(sxp->st.st_mode))
+	 || (!(preserve_times & PRESERVE_LINK_TIMES) && S_ISLNK(sxp->st.st_mode)))
+		flags |= ATTRS_SKIP_MTIME;
+	if (!(flags & ATTRS_SKIP_MTIME)
+	 && (sxp->st.st_mtime != file->modtime
+#ifdef ST_MTIME_NSEC
+	  || (NSEC_BUMP(file) && (uint32)sxp->st.ST_MTIME_NSEC != F_MOD_NSEC(file))
+#endif
+	  )) {
+		int ret = set_modtime(fname, file->modtime, F_MOD_NSEC(file), sxp->st.st_mode);
+		if (ret < 0) {
+			rsyserr(FERROR_XFER, errno, "failed to set times on %s",
+				full_fname(fname));
+			goto cleanup;
+		}
+		if (ret == 0) /* ret == 1 if symlink could not be set */
+			updated = 1;
+		else
+			file->flags |= FLAG_TIME_FAILED;
+	}
+
 #ifdef SUPPORT_ACLS
 	/* It's OK to call set_acl() now, even for a dir, as the generator
 	 * will enable owner-writability using chmod, if necessary.
@@ -517,27 +594,20 @@ int set_file_attrs(const char *fname, struct file_struct *file, stat_x *sxp,
 	}
 #endif
 
-	if (verbose > 1 && flags & ATTRS_REPORT) {
+	if (INFO_GTE(NAME, 2) && flags & ATTRS_REPORT) {
 		if (updated)
 			rprintf(FCLIENT, "%s\n", fname);
 		else
 			rprintf(FCLIENT, "%s is uptodate\n", fname);
 	}
   cleanup:
-	if (sxp == &sx2) {
-#ifdef SUPPORT_ACLS
-		if (preserve_acls)
-			free_acl(&sx2);
-#endif
-#ifdef SUPPORT_XATTRS
-		if (preserve_xattrs)
-			free_xattr(&sx2);
-#endif
-	}
+	if (sxp == &sx2)
+		free_stat_x(&sx2);
 	return updated;
 }
 
-RETSIGTYPE sig_int(UNUSED(int val))
+/* This is only called for SIGINT, SIGHUP, and SIGTERM. */
+void sig_int(int sig_num)
 {
         static int first = 1;
 
@@ -551,6 +621,23 @@ RETSIGTYPE sig_int(UNUSED(int val))
             return;
         }
         first = 0;
+
+	/* If we're an rsync daemon listener (not a daemon server),
+	 * we'll exit with status 0 if we received SIGTERM. */
+	if (am_daemon && !am_server && sig_num == SIGTERM)
+		exit_cleanup(0);
+
+	/* If the signal arrived on the server side (or for the receiver
+	 * process on the client), we want to try to do a controlled shutdown
+	 * that lets the client side (generator process) know what happened.
+	 * To do this, we set a flag and let the normal process handle the
+	 * shutdown.  We only attempt this if multiplexed IO is in effect and
+	 * we didn't already set the flag. */
+	if (!got_kill_signal && (am_server || am_receiver)) {
+		got_kill_signal = sig_num;
+		return;
+	}
+
 	exit_cleanup(RERR_SIGNAL);
 }
 
@@ -568,16 +655,17 @@ int finish_transfer(const char *fname, const char *fnametmp,
 	const char *temp_copy_name = partialptr && *partialptr != '/' ? partialptr : NULL;
 
 	if (inplace) {
-		if (verbose > 2)
+		if (DEBUG_GTE(RECV, 1))
 			rprintf(FINFO, "finishing %s\n", fname);
 		fnametmp = fname;
 		goto do_set_file_attrs;
 	}
 
 	if (make_backups > 0 && overwriting_basis) {
-		if (!make_backup(fname))
+		int ok = make_backup(fname, False);
+		if (!ok)
 			return 1;
-		if (fnamecmp == fname)
+		if (ok == 1 && fnamecmp == fname)
 			fnamecmp = get_backup_name(fname);
 	}
 
@@ -586,17 +674,15 @@ int finish_transfer(const char *fname, const char *fnametmp,
 		       ok_to_set_time ? 0 : ATTRS_SKIP_MTIME);
 
 	/* move tmp file over real file */
-	if (verbose > 2)
+	if (DEBUG_GTE(RECV, 1))
 		rprintf(FINFO, "renaming %s to %s\n", fnametmp, fname);
-	ret = robust_rename(fnametmp, fname, temp_copy_name,
-			    file->mode & INITACCESSPERMS);
+	ret = robust_rename(fnametmp, fname, temp_copy_name, file->mode);
 	if (ret < 0) {
 		rsyserr(FERROR_XFER, errno, "%s %s -> \"%s\"",
 			ret == -2 ? "copy" : "rename",
 			full_fname(fnametmp), fname);
 		if (!partialptr || (ret == -2 && temp_copy_name)
-		 || robust_rename(fnametmp, partialptr, NULL,
-				  file->mode & INITACCESSPERMS) < 0)
+		 || robust_rename(fnametmp, partialptr, NULL, file->mode) < 0)
 			do_unlink(fnametmp);
 		return 0;
 	}

@@ -1,5 +1,5 @@
 mailto(rsync-bugs@samba.org)
-manpage(rsync)(1)(23 Sep 2011)()()
+manpage(rsync)(1)(21 Dec 2015)()()
 manpagename(rsync)(a fast, versatile, remote (and local) file-copying tool)
 manpagesynopsis()
 
@@ -103,7 +103,10 @@ This would transfer all files matching the pattern *.c from the
 current directory to the directory src on the machine foo. If any of
 the files already exist on the remote system then the rsync
 remote-update protocol is used to update the file by sending only the
-differences. See the tech report for details.
+differences in the data.  Note that the expansion of wildcards on the
+commandline (*.c) into a list of files is handled by the shell before
+it runs rsync and not by rsync itself (exactly the same as all other
+posix-style programs).
 
 quote(tt(rsync -avz foo:src/bar /data/tmp))
 
@@ -331,6 +334,9 @@ manpagesection(OPTIONS SUMMARY)
 Here is a short summary of the options available in rsync. Please refer
 to the detailed description below for a complete description.  verb(
  -v, --verbose               increase verbosity
+     --info=FLAGS            fine-grained informational verbosity
+     --debug=FLAGS           fine-grained debug verbosity
+     --msgs2stderr           special output handling for debugging
  -q, --quiet                 suppress non-error messages
      --no-motd               suppress daemon-mode MOTD (see caveat)
  -c, --checksum              skip based on checksum, not mod-time & size
@@ -351,6 +357,7 @@ to the detailed description below for a complete description.  verb(
  -L, --copy-links            transform symlink into referent file/dir
      --copy-unsafe-links     only "unsafe" symlinks are transformed
      --safe-links            ignore symlinks that point outside the tree
+     --munge-links           munge symlinks to make them safer
  -k, --copy-dirlinks         transform symlink to dir into referent dir
  -K, --keep-dirlinks         treat symlinked dir on receiver as dir
  -H, --hard-links            preserve hard links
@@ -366,9 +373,11 @@ to the detailed description below for a complete description.  verb(
  -D                          same as --devices --specials
  -t, --times                 preserve modification times
  -O, --omit-dir-times        omit directories from --times
+ -J, --omit-link-times       omit symlinks from --times
      --super                 receiver attempts super-user activities
      --fake-super            store/recover privileged attrs using xattrs
  -S, --sparse                handle sparse files efficiently
+     --preallocate           allocate dest files before writing
  -n, --dry-run               perform a trial run with no changes made
  -W, --whole-file            copy files whole (w/o delta-xfer algorithm)
  -x, --one-file-system       don't cross filesystem boundaries
@@ -385,6 +394,8 @@ to the detailed description below for a complete description.  verb(
      --delete-delay          find deletions during, delete after
      --delete-after          receiver deletes after transfer, not during
      --delete-excluded       also delete excluded files from dest dirs
+     --ignore-missing-args   ignore missing source args without error
+     --delete-missing-args   delete missing source args from destination
      --ignore-errors         delete even if there are I/O errors
      --force                 force deletion of dirs even if not empty
      --max-delete=NUM        don't delete more than NUM files
@@ -395,6 +406,9 @@ to the detailed description below for a complete description.  verb(
      --delay-updates         put all updated files into place at end
  -m, --prune-empty-dirs      prune empty directory chains from file-list
      --numeric-ids           don't map uid/gid values by user/group name
+     --usermap=STRING        custom username mapping
+     --groupmap=STRING       custom groupname mapping
+     --chown=USER:GROUP      simple username/groupname mapping
      --timeout=SECONDS       set I/O timeout in seconds
      --contimeout=SECONDS    set daemon connection timeout in seconds
  -I, --ignore-times          don't skip files that match size and time
@@ -423,18 +437,20 @@ to the detailed description below for a complete description.  verb(
      --port=PORT             specify double-colon alternate port number
      --sockopts=OPTIONS      specify custom TCP options
      --blocking-io           use blocking I/O for the remote shell
+     --outbuf=N|L|B          set out buffering to None, Line, or Block
      --stats                 give some file-transfer stats
  -8, --8-bit-output          leave high-bit chars unescaped in output
  -h, --human-readable        output numbers in a human-readable format
      --progress              show progress during transfer
  -P                          same as --partial --progress
  -i, --itemize-changes       output a change-summary for all updates
+ -M, --remote-option=OPTION  send OPTION to the remote side only
      --out-format=FORMAT     output updates using the specified FORMAT
      --log-file=FILE         log what we're doing to the specified FILE
      --log-file-format=FMT   log updates using the specified FMT
      --password-file=FILE    read daemon-access password from FILE
      --list-only             list the files instead of copying them
-     --bwlimit=KBPS          limit I/O bandwidth; KBytes per second
+     --bwlimit=RATE          limit socket I/O bandwidth
      --write-batch=FILE      write a batched update to FILE
      --only-write-batch=FILE like --write-batch but w/o updating dest
      --read-batch=FILE       read a batched update from FILE
@@ -450,8 +466,9 @@ Rsync can also be run as a daemon, in which case the following options are
 accepted: verb(
      --daemon                run as an rsync daemon
      --address=ADDRESS       bind to the specified address
-     --bwlimit=KBPS          limit I/O bandwidth; KBytes per second
+     --bwlimit=RATE          limit socket I/O bandwidth
      --config=FILE           specify alternate rsyncd.conf file
+ -M, --dparam=OVERRIDE       override global daemon config parameter
      --no-detach             do not detach from the parent
      --port=PORT             listen on alternate port number
      --log-file=FILE         override the "log file" setting
@@ -492,14 +509,77 @@ information on what files are being skipped and slightly more
 information at the end. More than two bf(-v) options should only be used if
 you are debugging rsync.
 
-Note that the names of the transferred files that are output are done using
-a default bf(--out-format) of "%n%L", which tells you just the name of the
-file and, if the item is a link, where it points.  At the single bf(-v)
-level of verbosity, this does not mention when a file gets its attributes
-changed.  If you ask for an itemized list of changed attributes (either
-bf(--itemize-changes) or adding "%i" to the bf(--out-format) setting), the
-output (on the client) increases to mention all items that are changed in
-any way.  See the bf(--out-format) option for more details.
+In a modern rsync, the bf(-v) option is equivalent to the setting of groups
+of bf(--info) and bf(--debug) options.  You can choose to use these newer
+options in addition to, or in place of using bf(--verbose), as any
+fine-grained settings override the implied settings of bf(-v).  Both
+bf(--info) and bf(--debug) have a way to ask for help that tells you
+exactly what flags are set for each increase in verbosity.
+
+However, do keep in mind that a daemon's "max verbosity" setting will limit how
+high of a level the various individual flags can be set on the daemon side.
+For instance, if the max is 2, then any info and/or debug flag that is set to
+a higher value than what would be set by bf(-vv) will be downgraded to the
+bf(-vv) level in the daemon's logging.
+
+dit(bf(--info=FLAGS))
+This option lets you have fine-grained control over the
+information
+output you want to see.  An individual flag name may be followed by a level
+number, with 0 meaning to silence that output, 1 being the default output
+level, and higher numbers increasing the output of that flag (for those
+that support higher levels).  Use
+bf(--info=help)
+to see all the available flag names, what they output, and what flag names
+are added for each increase in the verbose level.  Some examples:
+
+verb(    rsync -a --info=progress2 src/ dest/
+    rsync -avv --info=stats2,misc1,flist0 src/ dest/ )
+
+Note that bf(--info=name)'s output is affected by the bf(--out-format) and
+bf(--itemize-changes) (bf(-i)) options.  See those options for more
+information on what is output and when.
+
+This option was added to 3.1.0, so an older rsync on the server side might
+reject your attempts at fine-grained control (if one or more flags needed
+to be send to the server and the server was too old to understand them).
+See also the "max verbosity" caveat above when dealing with a daemon.
+
+dit(bf(--debug=FLAGS))
+This option lets you have fine-grained control over the debug
+output you want to see.  An individual flag name may be followed by a level
+number, with 0 meaning to silence that output, 1 being the default output
+level, and higher numbers increasing the output of that flag (for those
+that support higher levels).  Use
+bf(--debug=help)
+to see all the available flag names, what they output, and what flag names
+are added for each increase in the verbose level.  Some examples:
+
+verb(    rsync -avvv --debug=none src/ dest/
+    rsync -avA --del --debug=del2,acl src/ dest/ )
+
+Note that some debug messages will only be output when bf(--msgs2stderr) is
+specified, especially those pertaining to I/O and buffer debugging.
+
+This option was added to 3.1.0, so an older rsync on the server side might
+reject your attempts at fine-grained control (if one or more flags needed
+to be send to the server and the server was too old to understand them).
+See also the "max verbosity" caveat above when dealing with a daemon.
+
+dit(bf(--msgs2stderr)) This option changes rsync to send all its output
+directly to stderr rather than to send messages to the client side via the
+protocol (which normally outputs info messages via stdout).  This is mainly
+intended for debugging in order to avoid changing the data sent via the
+protocol, since the extra protocol data can change what is being tested.
+The option does not affect the remote side of a transfer without using
+bf(--remote-option) -- e.g. bf(-M--msgs2stderr).
+Also keep in mind that a daemon connection does not have a stderr channel to send
+messages back to the client side, so if you are doing any daemon-transfer
+debugging using this option, you should start up a daemon using bf(--no-detach)
+so that you can see the stderr output on the daemon side.
+
+This option has the side-effect of making stderr output get line-buffered so
+that the merging of the output of 3 programs happens in a more readable manner.
 
 dit(bf(-q, --quiet)) This option decreases the amount of information you
 are given during the transfer, notably suppressing information messages
@@ -722,7 +802,7 @@ the destination and have a modified time that is newer than the source
 file.  (If an existing destination file has a modification time equal to the
 source file's, it will be updated if the sizes are different.)
 
-Note that this does not affect the copying of symlinks or other special
+Note that this does not affect the copying of dirs, symlinks, or other special
 files.  Also, a difference of file format between the sender and receiver
 is always considered to be important enough for an update, no matter what
 date is on the objects.  In other words, if the source has a directory
@@ -786,6 +866,11 @@ Implies bf(--inplace),
 but does not conflict with bf(--sparse) (since it is always extending a
 file's length).
 
+The use of bf(--append) can be dangerous if you aren't 100% sure that the files
+that are longer have only grown by the appending of data onto the end.  You
+should thus use include/exclude/filter rules to ensure that such a transfer is
+only affecting files that you know to be growing via appended data.
+
 dit(bf(--append-verify)) This works just like the bf(--append) option, but
 the existing data on the receiving side is included in the full-file
 checksum verification step, which will cause a file to be resent if the
@@ -837,6 +922,25 @@ dit(bf(--safe-links)) This tells rsync to ignore any symbolic links
 which point outside the copied tree. All absolute symlinks are
 also ignored. Using this option in conjunction with bf(--relative) may
 give unexpected results.
+
+dit(bf(--munge-links)) This option tells rsync to (1) modify all symlinks on
+the receiving side in a way that makes them unusable but recoverable (see
+below), or (2) to unmunge symlinks on the sending side that had been stored in
+a munged state.  This is useful if you don't quite trust the source of the data
+to not try to slip in a symlink to a unexpected place.
+
+The way rsync disables the use of symlinks is to prefix each one with the
+string "/rsyncd-munged/".  This prevents the links from being used as long as
+that directory does not exist.  When this option is enabled, rsync will refuse
+to run if that path is a directory or a symlink to a directory.
+
+The option only affects the client side of the transfer, so if you need it to
+affect the server, specify it via bf(--remote-option).  (Note that in a local
+transfer, the client side is the sender.)
+
+This option has no affect on a daemon, since the daemon configures whether it
+wants munged symlinks via its "munge symlinks" parameter.  See also the
+"munge-symlinks" perl script in the support directory of the source code.
 
 dit(bf(-k, --copy-dirlinks)) This option causes the sending side to treat
 a symlink to a directory as though it were a real directory.  This is
@@ -1025,6 +1129,10 @@ consistent executability across all bits:
 
 quote(--chmod=Dg+s,ug+w,Fo-w,+X)
 
+Using octal mode numbers is also allowed:
+
+quote(--chmod=D2775,F664)
+
 It is also legal to specify multiple bf(--chmod) options, as each
 additional option is just appended to the list of changes to make.
 
@@ -1077,6 +1185,20 @@ it is preserving modification times (see bf(--times)).  If NFS is sharing
 the directories on the receiving side, it is a good idea to use bf(-O).
 This option is inferred if you use bf(--backup) without bf(--backup-dir).
 
+This option also has the side-effect of avoiding early creation of directories
+in incremental recursion copies.  The default bf(--inc-recursive) copying
+normally does an early-create pass of all the sub-directories in a parent
+directory in order for it to be able to then set the modify time of the parent
+directory right away (without having to delay that until a bunch of recursive
+copying has finished).  This early-create idiom is not necessary if directory
+modify times are not being preserved, so it is skipped.  Since early-create
+directories don't have accurate mode, mtime, or ownership, the use of this
+option can help when someone wants to avoid these partially-finished
+directories.
+
+dit(bf(-J, --omit-link-times)) This tells rsync to omit symlinks when
+it is preserving modification times (see bf(--times)).
+
 dit(bf(--super)) This tells the receiving side to attempt super-user
 activities even if the receiving rsync wasn't run by the super-user.  These
 activities include: preserving users via the bf(--owner) option, preserving
@@ -1103,16 +1225,16 @@ This is a good way to backup data without using a super-user, and to store
 ACLs from incompatible systems.
 
 The bf(--fake-super) option only affects the side where the option is used.
-To affect the remote side of a remote-shell connection, specify an rsync
-path:
+To affect the remote side of a remote-shell connection, use the
+bf(--remote-option) (bf(-M)) option:
 
-quote(tt(  rsync -av --rsync-path="rsync --fake-super" /src/ host:/dest/))
+quote(tt(  rsync -av -M--fake-super /src/ host:/dest/))
 
-Since there is only one "side" in a local copy, this option affects both
-the sending and receiving of files.  You'll need to specify a copy using
-"localhost" if you need to avoid this, possibly using the "lsh" shell
-script (from the support directory) as a substitute for an actual remote
-shell (see bf(--rsh)).
+For a local copy, this option affects both the source and the destination.
+If you wish a local copy to enable this option just for the destination
+files, specify bf(-M--fake-super).  If you wish a local copy to enable
+this option just for the source files, combine bf(--fake-super) with
+bf(-M--super).
 
 This option is overridden by both bf(--super) and bf(--no-super).
 
@@ -1121,6 +1243,17 @@ See also the "fake super" setting in the daemon's rsyncd.conf file.
 dit(bf(-S, --sparse)) Try to handle sparse files efficiently so they take
 up less space on the destination.  Conflicts with bf(--inplace) because it's
 not possible to overwrite data in a sparse fashion.
+
+dit(bf(--preallocate)) This tells the receiver to allocate each destination
+file to its eventual size before writing data to the file.  Rsync will only use
+the real filesystem-level preallocation support provided by Linux's
+bf(fallocate)(2) system call or Cygwin's bf(posix_fallocate)(3), not the slow
+glibc implementation that writes a zero byte into each block.
+
+Without this option, larger files may not be entirely contiguous on the
+filesystem, but with this option rsync will probably copy more slowly.  If the
+destination is not an extent-supporting filesystem (such as ext4, xfs, NTFS,
+etc.), this option may have no positive effect at all.
 
 dit(bf(-n, --dry-run)) This makes rsync perform a trial run that doesn't
 make any changes (and produces mostly the same output as a real run).  It
@@ -1202,6 +1335,9 @@ a different directory, you should use a naming idiom that lets rsync avoid
 transferring files that are not yet finished (e.g. name the file "foo.new" when
 it is written, rename it to "foo" when it is done, and then use the option
 bf(--exclude='*.new') for the rsync transfer).
+
+Starting with 3.1.0, rsync will skip the sender-side removal (and output an
+error) if the file's size or modify time has not stayed unchanged.
 
 dit(bf(--delete)) This tells rsync to delete extraneous files from the
 receiving side (ones that aren't on the sending side), but only for the
@@ -1286,6 +1422,23 @@ this way on the receiver, and for a way to protect files from
 bf(--delete-excluded).
 See bf(--delete) (which is implied) for more details on file-deletion.
 
+dit(bf(--ignore-missing-args)) When rsync is first processing the explicitly
+requested source files (e.g. command-line arguments or bf(--files-from)
+entries), it is normally an error if the file cannot be found.  This option
+suppresses that error, and does not try to transfer the file.  This does not
+affect subsequent vanished-file errors if a file was initially found to be
+present and later is no longer there.
+
+dit(bf(--delete-missing-args)) This option takes the behavior of (the implied)
+bf(--ignore-missing-args) option a step farther:  each missing arg will become
+a deletion request of the corresponding destination file on the receiving side
+(should it exist).  If the destination file is a non-empty directory, it will
+only be successfully deleted if --force or --delete are in effect.  Other than
+that, this option is independent of any other type of delete processing.
+
+The missing source files are represented by special file-list entries which
+display as a "*missing" entry in the bf(--list-only) output.
+
 dit(bf(--ignore-errors)) Tells bf(--delete) to go ahead and delete files
 even when there are I/O errors.
 
@@ -1298,15 +1451,17 @@ using bf(--delete-after), and it used to be non-functional unless the
 bf(--recursive) option was also enabled.
 
 dit(bf(--max-delete=NUM)) This tells rsync not to delete more than NUM
-files or directories.  If that limit is exceeded, a warning is output
-and rsync exits with an error code of 25 (new for 3.0.0).
+files or directories.  If that limit is exceeded, all further deletions are
+skipped through the end of the transfer.  At the end, rsync outputs a warning
+(including a count of the skipped deletions) and exits with an error code
+of 25 (unless some more important error condition also occurred).
 
-Also new for version 3.0.0, you may specify bf(--max-delete=0) to be warned
+Beginning with version 3.0.0, you may specify bf(--max-delete=0) to be warned
 about any extraneous files in the destination without removing any of them.
 Older clients interpreted this as "unlimited", so if you don't know what
 version the client is, you can use the less obvious bf(--max-delete=-1) as
 a backward-compatible way to specify that no deletions be allowed (though
-older versions didn't warn when the limit was exceeded).
+really old versions didn't warn when the limit was exceeded).
 
 dit(bf(--max-size=SIZE)) This tells rsync to avoid transferring any
 file that is larger than the specified SIZE. The SIZE value can be
@@ -1328,10 +1483,14 @@ be offset by one byte in the indicated direction.
 Examples: --max-size=1.5mb-1 is 1499999 bytes, and --max-size=2g+1 is
 2147483649 bytes.
 
+Note that rsync versions prior to 3.1.0 did not allow bf(--max-size=0).
+
 dit(bf(--min-size=SIZE)) This tells rsync to avoid transferring any
 file that is smaller than the specified SIZE, which can help in not
 transferring small, junk files.
 See the bf(--max-size) option for a description of SIZE and other information.
+
+Note that rsync versions prior to 3.1.0 did not allow bf(--min-size=0).
 
 dit(bf(-B, --block-size=BLOCKSIZE)) This forces the block size used in
 rsync's delta-transfer algorithm to a fixed value.  It is normally selected based on
@@ -1383,6 +1542,36 @@ One tricky example is to set a different default directory on the remote
 machine for use with the bf(--relative) option.  For instance:
 
 quote(tt(    rsync -avR --rsync-path="cd /a/b && rsync" host:c/d /e/))
+
+dit(bf(-M, --remote-option=OPTION)) This option is used for more advanced
+situations where you want certain effects to be limited to one side of the
+transfer only.  For instance, if you want to pass bf(--log-file=FILE) and
+bf(--fake-super) to the remote system, specify it like this:
+
+quote(tt(    rsync -av -M --log-file=foo -M--fake-super src/ dest/))
+
+If you want to have an option affect only the local side of a transfer when
+it normally affects both sides, send its negation to the remote side.  Like
+this:
+
+quote(tt(    rsync -av -x -M--no-x src/ dest/))
+
+Be cautious using this, as it is possible to toggle an option that will cause
+rsync to have a different idea about what data to expect next over the socket,
+and that will make it fail in a cryptic fashion.
+
+Note that it is best to use a separate bf(--remote-option) for each option you
+want to pass.  This makes your useage compatible with the bf(--protect-args)
+option.  If that option is off, any spaces in your remote options will be split
+by the remote shell unless you take steps to protect them.
+
+When performing a local transfer, the "local" side is the sender and the
+"remote" side is the receiver.
+
+Note some versions of the popt option-parsing library have a bug in them that
+prevents you from using an adjacent arg with an equal in it next to a short
+option letter (e.g. tt(-M--log-file=/tmp/foo).  If this bug affects your
+version of popt, you can use the version of popt that is included with rsync.
 
 dit(bf(-C, --cvs-exclude)) This is a useful shorthand for excluding a
 broad range of files that you often don't want to transfer between
@@ -1548,10 +1737,27 @@ side will also be translated
 from the local to the remote character-set.  The translation happens before
 wild-cards are expanded.  See also the bf(--files-from) option.
 
+You may also control this option via the RSYNC_PROTECT_ARGS environment
+variable.  If this variable has a non-zero value, this option will be enabled
+by default, otherwise it will be disabled by default.  Either state is
+overridden by a manually specified positive or negative version of this option
+(note that bf(--no-s) and bf(--no-protect-args) are the negative versions).
+Since this option was first introduced in 3.0.0, you'll need to make sure it's
+disabled if you ever need to interact with a remote rsync that is older than
+that.
+
+Rsync can also be configured (at build time) to have this option enabled by
+default (with is overridden by both the environment and the command-line).
+This option will eventually become a new default setting at some
+as-yet-undetermined point in the future.
+
 dit(bf(-T, --temp-dir=DIR)) This option instructs rsync to use DIR as a
 scratch directory when creating temporary copies of the files transferred
 on the receiving side.  The default behavior is to create each temporary
 file in the same directory as the associated destination file.
+Beginning with rsync 3.1.1, the temp-file names inside the specified DIR will
+not be prefixed with an extra dot (though they will still have a random suffix
+added).
 
 This option is most often used when the receiving disk partition does not
 have enough free space to hold a copy of the largest file in the transfer.
@@ -1586,6 +1792,10 @@ looks in the same directory as the destination file for either a file that
 has an identical size and modified-time, or a similarly-named file.  If
 found, rsync uses the fuzzy basis file to try to speed up the transfer.
 
+If the option is repeated, the fuzzy scan will also be done in any matching
+alternate destination directories that are specified via bf(--compare-dest),
+bf(--copy-dest), or bf(--link-dest).
+
 Note that the use of the bf(--delete) option might get rid of any potential
 fuzzy-match files, so either use bf(--delete-after) or specify some
 filename exclusions if you need to prevent this.
@@ -1597,6 +1807,8 @@ directory).  If a file is found in em(DIR) that is identical to the
 sender's file, the file will NOT be transferred to the destination
 directory.  This is useful for creating a sparse backup of just files that
 have changed from an earlier backup.
+This option is typically used to copy into an empty (or newly created)
+directory.
 
 Beginning in version 2.6.4, multiple bf(--compare-dest) directories may be
 provided, which will cause rsync to search the list in the order specified
@@ -1608,6 +1820,10 @@ selected to try to speed up the transfer.
 
 If em(DIR) is a relative path, it is relative to the destination directory.
 See also bf(--copy-dest) and bf(--link-dest).
+
+NOTE: beginning with version 3.1.0, rsync will remove a file from a non-empty
+destination hierarchy if an exact match is found in one of the compare-dest
+hierarchies (making the end result more closely match a fresh copy).
 
 dit(bf(--copy-dest=DIR)) This option behaves like bf(--compare-dest), but
 rsync will also copy unchanged files found in em(DIR) to the destination
@@ -1646,10 +1862,11 @@ If a match is not found, a basis file from one of the em(DIR)s will be
 selected to try to speed up the transfer.
 
 This option works best when copying into an empty destination hierarchy, as
-rsync treats existing files as definitive (so it never looks in the link-dest
-dirs when a destination file already exists), and as malleable (so it might
-change the attributes of a destination file, which affects all the hard-linked
-versions).
+existing files may get their attributes tweaked, and that can affect alternate
+destination files via hard-links.  Also, itemizing of changes can get a bit
+muddled.  Note that prior to version 3.1.0, an alternate-directory exact match
+would never be found (nor linked into the destination) when a destination file
+already exists.
 
 Note that if you combine this option with bf(--ignore-times), rsync will not
 link any files together because it only links identical files together as a
@@ -1671,7 +1888,20 @@ being transmitted -- something that is useful over a slow connection.
 Note that this option typically achieves better compression ratios than can
 be achieved by using a compressing remote shell or a compressing transport
 because it takes advantage of the implicit information in the matching data
-blocks that are not explicitly sent over the connection.
+blocks that are not explicitly sent over the connection.  This matching-data
+compression comes at a cost of CPU, though, and can be disabled by repeating
+the bf(-z) option, but only if both sides are at least version 3.1.1.
+
+Note that if your version of rsync was compiled with an external zlib (instead
+of the zlib that comes packaged with rsync) then it will not support the
+old-style compression, only the new-style (repeated-option) compression.  In
+the future this new-style compression will likely become the default.
+
+The client rsync requests new-style compression on the server via the
+bf(--new-compress) option, so if you see that option rejected it means that
+the server is not new enough to support bf(-zz).  Rsync also accepts the
+bf(--old-compress) option for a future time when new-style compression
+becomes the default.
 
 See the bf(--skip-compress) option for the default list of file suffixes
 that will not be compressed.
@@ -1701,20 +1931,31 @@ The default list of suffixes that will not be compressed is this (in this
 version of rsync):
 
 bf(7z)
+bf(ace)
 bf(avi)
 bf(bz2)
 bf(deb)
+bf(gpg)
 bf(gz)
 bf(iso)
 bf(jpeg)
 bf(jpg)
+bf(lz)
+bf(lzma)
+bf(lzo)
 bf(mov)
 bf(mp3)
 bf(mp4)
 bf(ogg)
+bf(png)
+bf(rar)
 bf(rpm)
+bf(rzip)
 bf(tbz)
 bf(tgz)
+bf(tlz)
+bf(txz)
+bf(xz)
 bf(z)
 bf(zip)
 
@@ -1738,6 +1979,57 @@ from the source system is used instead.  See also the comments on the
 "use chroot" setting in the rsyncd.conf manpage for information on how
 the chroot setting affects rsync's ability to look up the names of the
 users and groups and what you can do about it.
+
+dit(bf(--usermap=STRING, --groupmap=STRING)) These options allow you to
+specify users and groups that should be mapped to other values by the
+receiving side.  The bf(STRING) is one or more bf(FROM):bf(TO) pairs of
+values separated by commas.  Any matching bf(FROM) value from the sender is
+replaced with a bf(TO) value from the receiver.  You may specify usernames
+or user IDs for the bf(FROM) and bf(TO) values, and the bf(FROM) value may
+also be a wild-card string, which will be matched against the sender's
+names (wild-cards do NOT match against ID numbers, though see below for
+why a '*' matches everything).  You may instead specify a range of ID
+numbers via an inclusive range: LOW-HIGH.  For example:
+
+verb(  --usermap=0-99:nobody,wayne:admin,*:normal --groupmap=usr:1,1:usr)
+
+The first match in the list is the one that is used.  You should specify
+all your user mappings using a single bf(--usermap) option, and/or all
+your group mappings using a single bf(--groupmap) option.
+
+Note that the sender's name for the 0 user and group are not transmitted
+to the receiver, so you should either match these values using a 0, or use
+the names in effect on the receiving side (typically "root").  All other
+bf(FROM) names match those in use on the sending side.  All bf(TO) names
+match those in use on the receiving side.
+
+Any IDs that do not have a name on the sending side are treated as having an
+empty name for the purpose of matching.  This allows them to be matched via
+a "*" or using an empty name.  For instance:
+
+verb(  --usermap=:nobody --groupmap=*:nobody)
+
+When the bf(--numeric-ids) option is used, the sender does not send any
+names, so all the IDs are treated as having an empty name.  This means that
+you will need to specify numeric bf(FROM) values if you want to map these
+nameless IDs to different values.
+
+For the bf(--usermap) option to have any effect, the bf(-o) (bf(--owner))
+option must be used (or implied), and the receiver will need to be running
+as a super-user (see also the bf(--fake-super) option).  For the bf(--groupmap)
+option to have any effect, the bf(-g) (bf(--groups)) option must be used
+(or implied), and the receiver will need to have permissions to set that
+group.
+
+dit(bf(--chown=USER:GROUP)) This option forces all files to be owned by USER
+with group GROUP.  This is a simpler interface than using bf(--usermap) and
+bf(--groupmap) directly, but it is implemented using those options internally,
+so you cannot mix them.  If either the USER or GROUP is empty, no mapping for
+the omitted user/group will occur.  If GROUP is empty, the trailing colon may
+be omitted, but if USER is empty, a leading colon must be supplied.
+
+If you specify "--chown=foo:bar, this is exactly the same as specifying
+"--usermap=*:foo --groupmap=*:bar", only easier.
 
 dit(bf(--timeout=TIMEOUT)) This option allows you to set a maximum I/O
 timeout in seconds. If no data is transferred for the specified time
@@ -1772,6 +2064,13 @@ a remote shell transport.  If the remote shell is either rsh or remsh,
 rsync defaults to using
 blocking I/O, otherwise it defaults to using non-blocking I/O.  (Note that
 ssh prefers non-blocking I/O.)
+
+dit(bf(--outbuf=MODE)) This sets the output buffering mode.  The mode can be
+None (aka Unbuffered), Line, or Block (aka Full).  You may specify as little
+as a single letter for the mode, and use upper or lower case.
+
+The main use of this option is to change Full buffering to Line buffering
+when rsync's output is going to a file or pipe.
 
 dit(bf(-i, --itemize-changes)) Requests a simple itemized list of the
 changes that are being made to each file, including attribute changes.
@@ -1852,13 +2151,13 @@ dit(bf(--out-format=FORMAT)) This allows you to specify exactly what the
 rsync client outputs to the user on a per-update basis.  The format is a
 text string containing embedded single-character escape sequences prefixed
 with a percent (%) character.   A default format of "%n%L" is assumed if
-bf(-v) is specified (which reports the name
+either bf(--info=name) or bf(-v) is specified (this tells you just the name
 of the file and, if the item is a link, where it points).  For a full list
 of the possible escape characters, see the "log format" setting in the
 rsyncd.conf manpage.
 
-Specifying the bf(--out-format) option
-will mention each file, dir, etc. that gets updated in a significant
+Specifying the bf(--out-format) option implies the bf(--info=name) option,
+which will mention each file, dir, etc. that gets updated in a significant
 way (a transferred file, a recreated symlink/device, or a touched
 directory).  In addition, if the itemize-changes escape (%i) is included in
 the string (e.g. if the bf(--itemize-changes) option was used), the logging
@@ -1883,7 +2182,7 @@ option if you wish to override this.
 Here's a example command that requests the remote side to log what is
 happening:
 
-verb(  rsync -av --rsync-path="rsync --log-file=/tmp/rlog" src/ dest/)
+verb(  rsync -av --remote-option=--log-file=/tmp/rlog src/ dest/)
 
 This is very useful if you need to debug why a connection is closing
 unexpectedly.
@@ -1900,14 +2199,29 @@ is '%i %n%L'.
 
 dit(bf(--stats)) This tells rsync to print a verbose set of statistics
 on the file transfer, allowing you to tell how effective rsync's delta-transfer
-algorithm is for your data.
+algorithm is for your data.  This option is equivalent to bf(--info=stats2)
+if combined with 0 or 1 bf(-v) options, or bf(--info=stats3) if combined
+with 2 or more bf(-v) options.
 
 The current statistics are as follows: quote(itemization(
   it() bf(Number of files) is the count of all "files" (in the generic
-  sense), which includes directories, symlinks, etc.
-  it() bf(Number of files transferred) is the count of normal files that
-  were updated via rsync's delta-transfer algorithm, which does not include created
-  dirs, symlinks, etc.
+  sense), which includes directories, symlinks, etc.  The total count will
+  be followed by a list of counts by filetype (if the total is non-zero).
+  For example: "(reg: 5, dir: 3, link: 2, dev: 1, special: 1)" lists the
+  totals for regular files, directories, symlinks, devices, and special
+  files.  If any of value is 0, it is completely omitted from the list.
+  it() bf(Number of created files) is the count of how many "files" (generic
+  sense) were created (as opposed to updated).  The total count will be
+  followed by a list of counts by filetype (if the total is non-zero).
+  it() bf(Number of deleted files) is the count of how many "files" (generic
+  sense) were created (as opposed to updated).  The total count will be
+  followed by a list of counts by filetype (if the total is non-zero).
+  Note that this line is only output if deletions are in effect, and only
+  if protocol 31 is being used (the default for rsync 3.1.x).
+  it() bf(Number of regular files transferred) is the count of normal files
+  that were updated via rsync's delta-transfer algorithm, which does not
+  include dirs, symlinks, etc.  Note that rsync 3.1.0 added the word
+  "regular" into this heading.
   it() bf(Total file size) is the total sum of all file sizes in the transfer.
   This does not count any size for directories or special files, but does
   include the size of symlinks.
@@ -1946,10 +2260,25 @@ would output as "\#012".  A literal backslash that is in a filename is not
 escaped unless it is followed by a hash and 3 digits (0-9).
 
 dit(bf(-h, --human-readable)) Output numbers in a more human-readable format.
-This makes big numbers output using larger units, with a K, M, or G suffix.  If
-this option was specified once, these units are K (1000), M (1000*1000), and
-G (1000*1000*1000); if the option is repeated, the units are powers of 1024
-instead of 1000.
+There are 3 possible levels:  (1) output numbers with a separator between each
+set of 3 digits (either a comma or a period, depending on if the decimal point
+is represented by a period or a comma); (2) output numbers in units of 1000
+(with a character suffix for larger units -- see below); (3) output numbers in
+units of 1024.
+
+The default is human-readable level 1.  Each bf(-h) option increases the level
+by one.  You can take the level down to 0 (to output numbers as pure digits) by
+specifing the bf(--no-human-readable) (bf(--no-h)) option.
+
+The unit letters that are appended in levels 2 and 3 are: K (kilo), M (mega),
+G (giga), or T (tera).  For example, a 1234567-byte file would output as 1.23M
+in level-2 (assuming that a period is your local decimal point).
+
+Backward compatibility note:  versions of rsync prior to 3.1.0 do not support
+human-readable level 1, and they default to level 0.  Thus, specifying one or
+two bf(-h) options will behave in a comparable manner in old and new versions
+as long as you didn't specify a bf(--no-h) option prior to one or more bf(-h)
+options.  See the bf(--list-only) option for one difference.
 
 dit(bf(--partial)) By default, rsync will delete any partially
 transferred file if the transfer is interrupted. In some circumstances
@@ -2078,7 +2407,9 @@ in place of the hide-filter (if that is more natural to you).
 dit(bf(--progress)) This option tells rsync to print information
 showing the progress of the transfer. This gives a bored user
 something to watch.
-Implies bf(--verbose) if it wasn't already specified.
+With a modern rsync this is the same as specifying
+bf(--info=flist2,name,progress), but any user-supplied settings for those
+info flags takes precedence (e.g. "--info=flist0 --progress").
 
 While rsync is transferring a regular file, it updates a progress line that
 looks like this:
@@ -2100,23 +2431,41 @@ was finishing the matched part of the file.
 When the file transfer finishes, rsync replaces the progress line with a
 summary line that looks like this:
 
-verb(     1238099 100%  146.38kB/s    0:00:08  (xfer#5, to-check=169/396))
+verb(      1,238,099 100%  146.38kB/s    0:00:08  (xfr#5, to-chk=169/396))
 
-In this example, the file was 1238099 bytes long in total, the average rate
+In this example, the file was 1,238,099 bytes long in total, the average rate
 of transfer for the whole file was 146.38 kilobytes per second over the 8
 seconds that it took to complete, it was the 5th transfer of a regular file
 during the current rsync session, and there are 169 more files for the
 receiver to check (to see if they are up-to-date or not) remaining out of
 the 396 total files in the file-list.
 
+In an incremental recursion scan, rsync won't know the total number of files
+in the file-list until it reaches the ends of the scan, but since it starts to
+transfer files during the scan, it will display a line with the text "ir-chk"
+(for incremental recursion check) instead of "to-chk" until the point that it
+knows the full size of the list, at which point it will switch to using
+"to-chk".  Thus, seeing "ir-chk" lets you know that the total count of files
+in the file list is still going to increase (and each time it does, the count
+of files left to check  will increase by the number of the files added to the
+list).
+
 dit(bf(-P)) The bf(-P) option is equivalent to bf(--partial) bf(--progress).  Its
 purpose is to make it much easier to specify these two options for a long
 transfer that may be interrupted.
 
-dit(bf(--password-file)) This option allows you to provide a password in a
-file for accessing an rsync daemon.  The file must not be world readable.
-It should contain just the password as the first line of the file (all
-other lines are ignored).
+There is also a bf(--info=progress2) option that outputs statistics based
+on the whole transfer, rather than individual files.  Use this flag without
+outputting a filename (e.g. avoid bf(-v) or specify bf(--info=name0)) if you
+want to see how the transfer is doing without scrolling the screen with a
+lot of names.  (You don't need to specify the bf(--progress) option in
+order to use bf(--info=progress2).)
+
+dit(bf(--password-file=FILE)) This option allows you to provide a password for
+accessing an rsync daemon via a file or via standard input if bf(FILE) is
+bf(-).  The file should contain just the password on the first line (all other
+lines are ignored).  Rsync will exit with an error if bf(FILE) is world
+readable or if a root-run rsync command finds a non-root-owned file.
 
 This option does not supply a password to a remote shell transport such as
 ssh; to learn how to do that, consult the remote shell's documentation.
@@ -2137,6 +2486,14 @@ without using this option.  For example:
 
 verb(    rsync -av --list-only foo* dest/)
 
+Starting with rsync 3.1.0, the sizes output by bf(--list-only) are affected
+by the bf(--human-readable) option.  By default they will contain digit
+separators, but higher levels of readability will output the sizes with
+unit suffixes.  Note also that the column width for the size output has
+increased from 11 to 14 characters for all human-readable levels.  Use
+bf(--no-h) if you want just digits in the sizes, and the old column width
+of 11 characters.
+
 Compatibility note:  when requesting a remote listing of files from an rsync
 that is version 2.6.3 or older, you may encounter an error if you ask for a
 non-recursive listing.  This is because a file listing implies the bf(--dirs)
@@ -2145,13 +2502,27 @@ avoid this problem, either specify the bf(--no-dirs) option (if you don't
 need to expand a directory's content), or turn on recursion and exclude
 the content of subdirectories: bf(-r --exclude='/*/*').
 
-dit(bf(--bwlimit=KBPS)) This option allows you to specify a maximum
-transfer rate in kilobytes per second. This option is most effective when
-using rsync with large files (several megabytes and up). Due to the nature
-of rsync transfers, blocks of data are sent, then if rsync determines the
-transfer was too fast, it will wait before sending the next data block. The
-result is an average transfer rate equaling the specified limit. A value
-of zero specifies no limit.
+dit(bf(--bwlimit=RATE)) This option allows you to specify the maximum transfer
+rate for the data sent over the socket, specified in units per second.  The
+RATE value can be suffixed with a string to indicate a size multiplier, and may
+be a fractional value (e.g.  "bf(--bwlimit=1.5m)").  If no suffix is specified,
+the value will be assumed to be in units of 1024 bytes (as if "K" or "KiB" had
+been appended).  See the bf(--max-size) option for a description of all the
+available suffixes. A value of zero specifies no limit.
+
+For backward-compatibility reasons, the rate limit will be rounded to the
+nearest KiB unit, so no rate smaller than 1024 bytes per second is possible.
+
+Rsync writes data over the socket in blocks, and this option both limits the
+size of the blocks that rsync writes, and tries to keep the average transfer
+rate at the requested limit.  Some "burstiness" may be seen where rsync writes
+out a block of data and then sleeps to bring the average rate into compliance.
+
+Due to the internal buffering of data, the bf(--progress) option may not be an
+accurate reflection on how fast the data is being sent.  This is because some
+files can show up as being rapidly sent when the data is quickly buffered,
+while other can show up as very slow when the flushing of the output buffer
+occurs.  This may be fixed in a future version.
 
 dit(bf(--write-batch=FILE)) Record a file that can later be applied to
 another identical destination with bf(--read-batch). See the "BATCH MODE"
@@ -2226,15 +2597,15 @@ If rsync was complied without support for IPv6, the bf(--ipv6) option
 will have no effect.  The bf(--version) output will tell you if this
 is the case.
 
-dit(bf(--checksum-seed=NUM)) Set the checksum seed to the integer
-NUM.  This 4 byte checksum seed is included in each block and file
-checksum calculation.  By default the checksum seed is generated
-by the server and defaults to the current code(time()).  This option
-is used to set a specific checksum seed, which is useful for
-applications that want repeatable block and file checksums, or
-in the case where the user wants a more random checksum seed.
-Setting NUM to 0 causes rsync to use the default of code(time())
-for checksum seed.
+dit(bf(--checksum-seed=NUM)) Set the checksum seed to the integer NUM.  This 4
+byte checksum seed is included in each block and MD4 file checksum calculation
+(the more modern MD5 file checksums don't use a seed).  By default the checksum
+seed is generated by the server and defaults to the current code(time()).  This
+option is used to set a specific checksum seed, which is useful for
+applications that want repeatable block checksums, or in the case where the
+user wants a more random checksum seed.  Setting NUM to 0 causes rsync to use
+the default of code(time()) for checksum seed.
+
 enddit()
 
 manpagesection(DAEMON OPTIONS)
@@ -2259,17 +2630,24 @@ allows you to specify a specific IP address (or hostname) to bind to.  This
 makes virtual hosting possible in conjunction with the bf(--config) option.
 See also the "address" global option in the rsyncd.conf manpage.
 
-dit(bf(--bwlimit=KBPS)) This option allows you to specify a maximum
-transfer rate in kilobytes per second for the data the daemon sends.
-The client can still specify a smaller bf(--bwlimit) value, but their
-requested value will be rounded down if they try to exceed it.  See the
-client version of this option (above) for some extra details.
+dit(bf(--bwlimit=RATE)) This option allows you to specify the maximum transfer
+rate for the data the daemon sends over the socket.  The client can still
+specify a smaller bf(--bwlimit) value, but no larger value will be allowed.
+See the client version of this option (above) for some extra details.
 
 dit(bf(--config=FILE)) This specifies an alternate config file than
 the default.  This is only relevant when bf(--daemon) is specified.
 The default is /etc/rsyncd.conf unless the daemon is running over
 a remote shell program and the remote user is not the super-user; in that case
 the default is rsyncd.conf in the current directory (typically $HOME).
+
+dit(bf(-M, --dparam=OVERRIDE)) This option can be used to set a daemon-config
+parameter when starting up rsync in daemon mode.  It is equivalent to adding
+the parameter at the end of the global settings prior to the first module's
+definition.  The parameter names can be specified without spaces, if you so
+desire.  For instance:
+
+verb(    rsync --daemon -M pidfile=/path/rsync.pid )
 
 dit(bf(--no-detach)) When running as a daemon, this option instructs
 rsync to not detach itself and become a background process.  This
@@ -2410,6 +2788,10 @@ itemization(
   it() a '[' introduces a character class, such as [a-z] or [[:alpha:]].
   it() in a wildcard pattern, a backslash can be used to escape a wildcard
   character, but it is matched literally when no wildcards are present.
+  This means that there is an extra level of backslash removal when a
+  pattern contains wildcard characters compared to a pattern that has none.
+  e.g. if you add a wildcard to "foo\bar" (which matches the backslash) you
+  would need to use "foo\\bar*" to avoid the "\b" becoming just "b".
   it() if the pattern contains a / (not counting a trailing /) or a "**",
   then it is matched against the full pathname, including any leading
   directories. If the pattern doesn't contain a / or a "**", then it is
@@ -2981,6 +3363,9 @@ ignore patterns in .cvsignore files. See the bf(--cvs-exclude) option for
 more details.
 dit(bf(RSYNC_ICONV)) Specify a default bf(--iconv) setting using this
 environment variable. (First supported in 3.0.0.)
+dit(bf(RSYNC_PROTECT_ARGS)) Specify a non-zero numeric value if you want the
+bf(--protect-args) option to be enabled by default, or a zero value to make
+sure that it is disabled by default. (First supported in 3.1.0.)
 dit(bf(RSYNC_RSH)) The RSYNC_RSH environment variable allows you to
 override the default shell used as the transport for rsync.  Command line
 options are permitted after the command name, just as in the bf(-e) option.
@@ -3025,7 +3410,7 @@ url(http://rsync.samba.org/)(http://rsync.samba.org/)
 
 manpagesection(VERSION)
 
-This man page is current for version 3.0.9 of rsync.
+This man page is current for version 3.1.2 of rsync.
 
 manpagesection(INTERNAL OPTIONS)
 
@@ -3039,7 +3424,7 @@ ssh login.
 
 manpagesection(CREDITS)
 
-rsync is distributed under the GNU public license.  See the file
+rsync is distributed under the GNU General Public License.  See the file
 COPYING for details.
 
 A WEB site is available at

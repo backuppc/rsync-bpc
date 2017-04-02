@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1992-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2002-2009 Wayne Davison
+ * Copyright (C) 2002-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -41,7 +41,6 @@ char *client_addr(int fd)
 	static int initialised;
 	struct sockaddr_storage ss;
 	socklen_t length = sizeof ss;
-	char *ssh_info, *p;
 
 	if (initialised)
 		return addr_buf;
@@ -49,11 +48,14 @@ char *client_addr(int fd)
 	initialised = 1;
 
 	if (am_server) {	/* daemon over --rsh mode */
+		char *env_str;
 		strlcpy(addr_buf, "0.0.0.0", sizeof addr_buf);
-		if ((ssh_info = getenv("SSH_CONNECTION")) != NULL
-		    || (ssh_info = getenv("SSH_CLIENT")) != NULL
-		    || (ssh_info = getenv("SSH2_CLIENT")) != NULL) {
-			strlcpy(addr_buf, ssh_info, sizeof addr_buf);
+		if ((env_str = getenv("REMOTE_HOST")) != NULL
+		 || (env_str = getenv("SSH_CONNECTION")) != NULL
+		 || (env_str = getenv("SSH_CLIENT")) != NULL
+		 || (env_str = getenv("SSH2_CLIENT")) != NULL) {
+			char *p;
+			strlcpy(addr_buf, env_str, sizeof addr_buf);
 			/* Truncate the value to just the IP address. */
 			if ((p = strchr(addr_buf, ' ')) != NULL)
 				*p = '\0';

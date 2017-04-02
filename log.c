@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1998-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2000-2001 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,9 +20,9 @@
  */
 
 #include "rsync.h"
-#include "ifuncs.h"
+#include "itypes.h"
+#include "inums.h"
 
-extern int verbose;
 extern int dry_run;
 extern int am_daemon;
 extern int am_server;
@@ -31,16 +31,19 @@ extern int am_generator;
 extern int local_server;
 extern int quiet;
 extern int module_id;
-extern int msg_fd_out;
+extern int checksum_len;
 extern int allow_8bit_chars;
 extern int protocol_version;
+extern int always_checksum;
 extern int preserve_times;
-extern int progress_is_active;
+extern int msgs2stderr;
 extern int stdout_format_has_i;
 extern int stdout_format_has_o_or_i;
 extern int logfile_format_has_i;
 extern int logfile_format_has_o_or_i;
 extern int receiver_symlink_times;
+extern int64 total_data_written;
+extern int64 total_data_read;
 extern mode_t orig_umask;
 extern char *auth_user;
 extern char *stdout_format;
@@ -55,6 +58,8 @@ extern iconv_t ic_recv;
 extern char curr_dir[MAXPATHLEN];
 extern char *full_module_path;
 extern unsigned int module_dirlen;
+extern char sender_file_sum[MAX_DIGEST_LEN];
+extern const char undetermined_hostname[];
 
 static int log_initialised;
 static int logfile_was_closed;
@@ -62,6 +67,11 @@ static FILE *logfile_fp;
 struct stats stats;
 
 int got_xfer_error = 0;
+int output_needs_newline = 0;
+int send_msgs_to_gen = 0;
+
+static int64 initial_data_written;
+static int64 initial_data_read;
 
 struct {
         int code;
@@ -85,13 +95,13 @@ struct {
 	{ RERR_MALLOC     , "error allocating core memory buffers" },
 	{ RERR_PARTIAL    , "some files/attrs were not transferred (see previous errors)" },
 	{ RERR_VANISHED   , "some files vanished before they could be transferred" },
+	{ RERR_DEL_LIMIT  , "the --max-delete limit stopped deletions" },
 	{ RERR_TIMEOUT    , "timeout in data send/receive" },
 	{ RERR_CONTIMEOUT , "timeout waiting for daemon connection" },
 	{ RERR_CMD_FAILED , "remote shell failed" },
 	{ RERR_CMD_KILLED , "remote shell killed" },
 	{ RERR_CMD_RUN    , "remote command could not be run" },
 	{ RERR_CMD_NOTFOUND,"remote command not found" },
-	{ RERR_DEL_LIMIT  , "the --max-delete limit stopped deletions" },
 	{ 0, NULL }
 };
 
@@ -113,8 +123,7 @@ static void logit(int priority, const char *buf)
 	if (logfile_was_closed)
 		logfile_reopen();
 	if (logfile_fp) {
-		fprintf(logfile_fp, "%s [%d] %s",
-			timestring(time(NULL)), (int)getpid(), buf);
+		fprintf(logfile_fp, "%s [%d] %s", timestring(time(NULL)), (int)getpid(), buf);
 		fflush(logfile_fp);
 	} else {
 		syslog(priority, "%s", buf);
@@ -242,7 +251,7 @@ static void filtered_fwrite(FILE *f, const char *buf, int len, int use_isprint, 
 void rwrite(enum logcode code, const char *buf, int len, int is_utf8)
 {
 	int trailing_CR_or_NL;
-	FILE *f = NULL;
+	FILE *f = msgs2stderr ? stderr : stdout;
 #ifdef ICONV_OPTION
 	iconv_t ic = is_utf8 && ic_recv != (iconv_t)-1 ? ic_recv : ic_chck;
 #else
@@ -254,7 +263,16 @@ void rwrite(enum logcode code, const char *buf, int len, int is_utf8)
 	if (len < 0)
 		exit_cleanup(RERR_MESSAGEIO);
 
-	if (am_server && msg_fd_out >= 0) {
+	if (msgs2stderr) {
+		if (!am_daemon) {
+			if (code == FLOG)
+				return;
+			goto output_msg;
+		}
+		if (code == FCLIENT)
+			return;
+		code = FLOG;
+	} else if (send_msgs_to_gen) {
 		assert(!is_utf8);
 		/* Pass the message to our sibling in native charset. */
 		send_msg((enum msgcode)code, buf, len, 0);
@@ -307,30 +325,42 @@ void rwrite(enum logcode code, const char *buf, int len, int is_utf8)
 			/* TODO: can we send the error to the user somehow? */
 			return;
 		}
+		f = stderr;
 	}
 
+output_msg:
 	switch (code) {
 	case FERROR_XFER:
 		got_xfer_error = 1;
 		/* FALL THROUGH */
 	case FERROR:
+	case FERROR_UTF8:
+	case FERROR_SOCKET:
 	case FWARNING:
-		f = stderr;
-		break;
 	case FINFO:
 		f = stderr;
 		break;
+	case FLOG:
+	case FCLIENT:
+		break;
 	default:
+		fprintf(stderr, "Unknown logcode in rwrite(): %d [%s]\n", (int)code, who_am_i());
 		exit_cleanup(RERR_MESSAGEIO);
 	}
 
-	if (progress_is_active && !am_server) {
+	if (output_needs_newline) {
 		fputc('\n', f);
-		progress_is_active = 0;
+		output_needs_newline = 0;
 	}
 
 	trailing_CR_or_NL = len && (buf[len-1] == '\n' || buf[len-1] == '\r')
 			  ? buf[--len] : 0;
+
+	if (len && buf[0] == '\r') {
+		fputc('\r', f);
+		buf++;
+		len--;
+	}
 
 #ifdef ICONV_CONST
 	if (ic != (iconv_t)-1) {
@@ -340,13 +370,13 @@ void rwrite(enum logcode code, const char *buf, int len, int is_utf8)
 
 		INIT_CONST_XBUF(outbuf, convbuf);
                 if ( trailing_CR_or_NL ) {
-                    INIT_XBUF(inbuf, (char*)buf, len + 1, -1);
+                    INIT_XBUF(inbuf, (char*)buf, len + 1, (size_t)-1);
                 } else {
-                    INIT_XBUF(inbuf, (char*)buf, len, -1);
+                    INIT_XBUF(inbuf, (char*)buf, len, (size_t)-1);
                 }
 
 		while (inbuf.len) {
-			iconvbufs(ic, &inbuf, &outbuf, 0);
+			iconvbufs(ic, &inbuf, &outbuf, inbuf.pos ? 0 : ICB_INIT);
 			ierrno = errno;
 			if (outbuf.len) {
                                 if ( trailing_CR_or_NL ) {
@@ -441,12 +471,12 @@ void rsyserr(enum logcode code, int errcode, const char *format, ...)
 
 void rflush(enum logcode code)
 {
-	FILE *f = NULL;
+	FILE *f;
 
 	if (am_daemon || code == FLOG)
 		return;
 
-	if (code == FINFO && !am_server)
+	if (!am_server && (code == FINFO || code == FCLIENT))
 		f = stderr;
 	else
 		f = stderr;
@@ -454,10 +484,15 @@ void rflush(enum logcode code)
 	fflush(f);
 }
 
+void remember_initial_stats(void)
+{
+	initial_data_read = total_data_read;
+	initial_data_written = total_data_written;
+}
+
 /* A generic logging routine for send/recv, with parameter substitiution. */
 static void log_formatted(enum logcode code, const char *format, const char *op,
-			  struct file_struct *file, const char *fname,
-			  struct stats *initial_stats, int iflags,
+			  struct file_struct *file, const char *fname, int iflags,
 			  const char *hlink)
 {
 	char buf[MAXPATHLEN+1024], buf2[MAXPATHLEN], fmt[32];
@@ -480,30 +515,45 @@ static void log_formatted(enum logcode code, const char *format, const char *op,
 	buf[total] = '\0';
 
 	for (p = buf; (p = strchr(p, '%')) != NULL; ) {
+		int humanize = 0;
 		s = p++;
 		c = fmt + 1;
+		while (*p == '\'') {
+			humanize++;
+			p++;
+		}
 		if (*p == '-')
 			*c++ = *p++;
 		while (isDigit(p) && c - fmt < (int)(sizeof fmt) - 8)
 			*c++ = *p++;
+		while (*p == '\'') {
+			humanize++;
+			p++;
+		}
 		if (!*p)
 			break;
 		*c = '\0';
 		n = NULL;
 
+		/* Note for %h and %a: it doesn't matter what fd we pass to
+		 * client_{name,addr} because rsync_module will already have
+		 * forced the answer to be cached (assuming, of course, for %h
+		 * that lp_reverse_lookup(module_id) is true). */
 		switch (*p) {
 		case 'h':
-			if (am_daemon)
-				n = client_name(0);
+			if (am_daemon) {
+				n = lp_reverse_lookup(module_id)
+				  ? client_name(0) : undetermined_hostname;
+			}
 			break;
 		case 'a':
 			if (am_daemon)
 				n = client_addr(0);
 			break;
 		case 'l':
-			strlcat(fmt, ".0f", sizeof fmt);
+			strlcat(fmt, "s", sizeof fmt);
 			snprintf(buf2, sizeof buf2, fmt,
-				 (double)F_LENGTH(file));
+				 do_big_num(F_LENGTH(file), humanize, NULL));
 			n = buf2;
 			break;
 		case 'U':
@@ -523,9 +573,8 @@ static void log_formatted(enum logcode code, const char *format, const char *op,
 			}
 			break;
 		case 'p':
-			strlcat(fmt, "ld", sizeof fmt);
-			snprintf(buf2, sizeof buf2, fmt,
-				 (long)getpid());
+			strlcat(fmt, "d", sizeof fmt);
+			snprintf(buf2, sizeof buf2, fmt, (int)getpid());
 			n = buf2;
 			break;
 		case 'M':
@@ -612,28 +661,30 @@ static void log_formatted(enum logcode code, const char *format, const char *op,
 			n = auth_user;
 			break;
 		case 'b':
-			if (am_sender) {
-				b = stats.total_written -
-					initial_stats->total_written;
-			} else {
-				b = stats.total_read -
-					initial_stats->total_read;
-			}
-			strlcat(fmt, ".0f", sizeof fmt);
-			snprintf(buf2, sizeof buf2, fmt, (double)b);
+		case 'c':
+			if (!(iflags & ITEM_TRANSFER))
+				b = 0;
+			else if ((!!am_sender) ^ (*p == 'c'))
+				b = total_data_written - initial_data_written;
+			else
+				b = total_data_read - initial_data_read;
+			strlcat(fmt, "s", sizeof fmt);
+			snprintf(buf2, sizeof buf2, fmt,
+				 do_big_num(b, humanize, NULL));
 			n = buf2;
 			break;
-		case 'c':
-			if (!am_sender) {
-				b = stats.total_written -
-					initial_stats->total_written;
+		case 'C':
+			if (protocol_version >= 30
+			 && (iflags & ITEM_TRANSFER
+			  || (always_checksum && S_ISREG(file->mode)))) {
+				const char *sum = iflags & ITEM_TRANSFER
+						? sender_file_sum : F_SUM(file);
+				n = sum_as_hex(sum);
 			} else {
-				b = stats.total_read -
-					initial_stats->total_read;
+				memset(buf2, ' ', checksum_len*2);
+				buf2[checksum_len*2] = '\0';
+				n = buf2;
 			}
-			strlcat(fmt, ".0f", sizeof fmt);
-			snprintf(buf2, sizeof buf2, fmt, (double)b);
-			n = buf2;
 			break;
 		case 'i':
 			if (iflags & ITEM_DELETED) {
@@ -733,10 +784,12 @@ int log_format_has(const char *format, char esc)
 		return 0;
 
 	for (p = format; (p = strchr(p, '%')) != NULL; ) {
-		if (*++p == '-')
+		for (p++; *p == '\''; p++) {} /*SHARED ITERATOR*/
+		if (*p == '-')
 			p++;
 		while (isDigit(p))
 			p++;
+		while (*p == '\'') p++;
 		if (!*p)
 			break;
 		if (*p == esc)
@@ -748,19 +801,14 @@ int log_format_has(const char *format, char esc)
 /* Log the transfer of a file.  If the code is FCLIENT, the output just goes
  * to stdout.  If it is FLOG, it just goes to the log file.  Otherwise we
  * output to both. */
-void log_item(enum logcode code, struct file_struct *file,
-	      struct stats *initial_stats, int iflags, const char *hlink)
+void log_item(enum logcode code, struct file_struct *file, int iflags, const char *hlink)
 {
 	const char *s_or_r = am_sender ? "send" : "recv";
 
-	if (code != FLOG && stdout_format && !am_server) {
-		log_formatted(FCLIENT, stdout_format, s_or_r,
-			      file, NULL, initial_stats, iflags, hlink);
-	}
-	if (code != FCLIENT && logfile_format && *logfile_format) {
-		log_formatted(FLOG, logfile_format, s_or_r,
-			      file, NULL, initial_stats, iflags, hlink);
-	}
+	if (code != FLOG && stdout_format && !am_server)
+		log_formatted(FCLIENT, stdout_format, s_or_r, file, NULL, iflags, hlink);
+	if (code != FCLIENT && logfile_format && *logfile_format)
+		log_formatted(FLOG, logfile_format, s_or_r, file, NULL, iflags, hlink);
 }
 
 void maybe_log_item(struct file_struct *file, int iflags, int itemizing,
@@ -768,16 +816,16 @@ void maybe_log_item(struct file_struct *file, int iflags, int itemizing,
 {
 	int significant_flags = iflags & SIGNIFICANT_ITEM_FLAGS;
 	int see_item = itemizing && (significant_flags || *buf
-		|| stdout_format_has_i > 1 || (verbose > 1 && stdout_format_has_i));
+		|| stdout_format_has_i > 1 || (INFO_GTE(NAME, 2) && stdout_format_has_i));
 	int local_change = iflags & ITEM_LOCAL_CHANGE && significant_flags;
 	if (am_server) {
 		if (logfile_name && !dry_run && see_item
 		 && (significant_flags || logfile_format_has_i))
-			log_item(FLOG, file, &stats, iflags, buf);
+			log_item(FLOG, file, iflags, buf);
 	} else if (see_item || local_change || *buf
 	    || (S_ISDIR(file->mode) && significant_flags)) {
 		enum logcode code = significant_flags || logfile_format_has_i ? FINFO : FCLIENT;
-		log_item(code, file, &stats, iflags, buf);
+		log_item(code, file, iflags, buf);
 	}
 }
 
@@ -786,29 +834,28 @@ void log_delete(const char *fname, int mode)
 	static struct {
 		union file_extras ex[4]; /* just in case... */
 		struct file_struct file;
-	} x;
+	} x; /* Zero-initialized due to static declaration. */
 	int len = strlen(fname);
 	const char *fmt;
 
 	x.file.mode = mode;
 
-	if (!verbose && !stdout_format)
-		;
-	else if (am_server && protocol_version >= 29 && len < MAXPATHLEN) {
+	if (am_server && protocol_version >= 29 && len < MAXPATHLEN) {
 		if (S_ISDIR(mode))
 			len++; /* directories include trailing null */
 		send_msg(MSG_DELETED, fname, len, am_generator);
-	} else {
+	} else if (!INFO_GTE(DEL, 1) && !stdout_format)
+		;
+	else {
 		fmt = stdout_format_has_o_or_i ? stdout_format : "deleting %n";
-		log_formatted(FCLIENT, fmt, "del.", &x.file, fname, &stats,
-			      ITEM_DELETED, NULL);
+		log_formatted(FCLIENT, fmt, "del.", &x.file, fname, ITEM_DELETED, NULL);
 	}
 
 	if (!logfile_name || dry_run || !logfile_format)
 		return;
 
 	fmt = logfile_format_has_o_or_i ? logfile_format : "deleting %n";
-	log_formatted(FLOG, fmt, "del.", &x.file, fname, &stats, ITEM_DELETED, NULL);
+	log_formatted(FLOG, fmt, "del.", &x.file, fname, ITEM_DELETED, NULL);
 }
 
 /*
@@ -820,10 +867,10 @@ void log_delete(const char *fname, int mode)
 void log_exit(int code, const char *file, int line)
 {
 	if (code == 0) {
-		rprintf(FLOG,"sent %.0f bytes  received %.0f bytes  total size %.0f\n",
-			(double)stats.total_written,
-			(double)stats.total_read,
-			(double)stats.total_size);
+		rprintf(FLOG,"sent %s bytes  received %s bytes  total size %s\n",
+			big_num(stats.total_written),
+			big_num(stats.total_read),
+			big_num(stats.total_size));
 	} else if (am_server != 2) {
 		const char *name;
 

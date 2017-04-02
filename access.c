@@ -2,7 +2,7 @@
  * Routines to authenticate access to a daemon (hosts allow/deny).
  *
  * Copyright (C) 1998 Andrew Tridgell
- * Copyright (C) 2004-2009 Wayne Davison
+ * Copyright (C) 2004-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,14 +20,50 @@
 
 #include "rsync.h"
 
-static int match_hostname(char *host, char *tok)
+static int allow_forward_dns;
+
+extern const char undetermined_hostname[];
+
+static int match_hostname(const char **host_ptr, const char *addr, const char *tok)
 {
+	struct hostent *hp;
+	unsigned int i;
+	const char *host = *host_ptr;
+
 	if (!host || !*host)
 		return 0;
-	return wildmatch(tok, host);
+
+	/* First check if the reverse-DNS-determined hostname matches. */
+	if (iwildmatch(tok, host))
+		return 1;
+
+	if (!allow_forward_dns)
+		return 0;
+
+	/* Fail quietly if tok is an address or wildcarded entry, not a simple hostname. */
+	if (!tok[strspn(tok, ".0123456789")] || tok[strcspn(tok, ":/*?[")])
+		return 0;
+
+	/* Now try forward-DNS on the token (config-specified hostname) and see if the IP matches. */
+	if (!(hp = gethostbyname(tok)))
+		return 0;
+
+	for (i = 0; hp->h_addr_list[i] != NULL; i++) {
+		if (strcmp(addr, inet_ntoa(*(struct in_addr*)(hp->h_addr_list[i]))) == 0) {
+			/* If reverse lookups are off, we'll use the conf-specified
+			 * hostname in preference to UNDETERMINED. */
+			if (host == undetermined_hostname) {
+				if (!(*host_ptr = strdup(tok)))
+					*host_ptr = undetermined_hostname;
+			}
+			return 1;
+		}
+	}
+
+	return 0;
 }
 
-static int match_binary(char *b1, char *b2, char *mask, int addrlen)
+static int match_binary(const char *b1, const char *b2, const char *mask, int addrlen)
 {
 	int i;
 
@@ -56,7 +92,7 @@ static void make_mask(char *mask, int plen, int addrlen)
 	return;
 }
 
-static int match_address(char *addr, char *tok)
+static int match_address(const char *addr, const char *tok)
 {
 	char *p;
 	struct addrinfo hints, *resa, *rest;
@@ -70,24 +106,16 @@ static int match_address(char *addr, char *tok)
 #endif
 	char mask[16];
 	char *a = NULL, *t = NULL;
-	unsigned int len;
 
 	if (!addr || !*addr)
 		return 0;
 
 	p = strchr(tok,'/');
-	if (p) {
+	if (p)
 		*p = '\0';
-		len = p - tok;
-	} else
-		len = strlen(tok);
 
-	/* Fail quietly if tok is a hostname (not an address) */
-	if (strspn(tok, ".0123456789") != len
-#ifdef INET6
-	    && strchr(tok, ':') == NULL
-#endif
-	) {
+	/* Fail quietly if tok is a hostname, not an address. */
+	if (tok[strspn(tok, ".0123456789")] && strchr(tok, ':') == NULL) {
 		if (p)
 			*p = '/';
 		return 0;
@@ -210,7 +238,7 @@ static int match_address(char *addr, char *tok)
 	return ret;
 }
 
-static int access_match(char *list, char *addr, char *host)
+static int access_match(const char *list, const char *addr, const char **host_ptr)
 {
 	char *tok;
 	char *list2 = strdup(list);
@@ -219,11 +247,9 @@ static int access_match(char *list, char *addr, char *host)
 		out_of_memory("access_match");
 
 	strlower(list2);
-	if (host)
-		strlower(host);
 
 	for (tok = strtok(list2, " ,\t"); tok; tok = strtok(NULL, " ,\t")) {
-		if (match_hostname(host, tok) || match_address(addr, tok)) {
+		if (match_hostname(host_ptr, addr, tok) || match_address(addr, tok)) {
 			free(list2);
 			return 1;
 		}
@@ -233,16 +259,21 @@ static int access_match(char *list, char *addr, char *host)
 	return 0;
 }
 
-int allow_access(char *addr, char *host, char *allow_list, char *deny_list)
+int allow_access(const char *addr, const char **host_ptr, int i)
 {
+	const char *allow_list = lp_hosts_allow(i);
+	const char *deny_list = lp_hosts_deny(i);
+
 	if (allow_list && !*allow_list)
 		allow_list = NULL;
 	if (deny_list && !*deny_list)
 		deny_list = NULL;
 
+	allow_forward_dns = lp_forward_lookup(i);
+
 	/* If we match an allow-list item, we always allow access. */
 	if (allow_list) {
-		if (access_match(allow_list, addr, host))
+		if (access_match(allow_list, addr, host_ptr))
 			return 1;
 		/* For an allow-list w/o a deny-list, disallow non-matches. */
 		if (!deny_list)
@@ -251,7 +282,7 @@ int allow_access(char *addr, char *host, char *allow_list, char *deny_list)
 
 	/* If we match a deny-list item (and got past any allow-list
 	 * items), we always disallow access. */
-	if (deny_list && access_match(deny_list, addr, host))
+	if (deny_list && access_match(deny_list, addr, host_ptr))
 		return 0;
 
 	/* Allow all other access. */

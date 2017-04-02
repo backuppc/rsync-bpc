@@ -75,6 +75,7 @@
 
 #include "rsync.h"
 #include "ifuncs.h"
+#include "itypes.h"
 
 /* -------------------------------------------------------------------------- **
  * Constants...
@@ -93,6 +94,8 @@
 
 static char *bufr  = NULL;
 static int   bSize = 0;
+static BOOL  (*the_sfunc)(char *);
+static BOOL  (*the_pfunc)(char *, char *);
 
 /* -------------------------------------------------------------------------- **
  * Functions...
@@ -223,7 +226,7 @@ static BOOL Section( FILE *InFile, BOOL (*sfunc)(char *) )
         bufr[end] = '\0';
         if( 0 == end )                  /* Don't allow an empty name.       */
           {
-          rprintf(FLOG, "%s Empty section name in configuration file.\n", func );
+          rprintf(FLOG, "%s Empty section name in config file.\n", func );
           return( False );
           }
         if( !sfunc( bufr ) )            /* Got a valid name.  Deal with it. */
@@ -236,7 +239,7 @@ static BOOL Section( FILE *InFile, BOOL (*sfunc)(char *) )
         if( i < 0 )
           {
           bufr[end] = '\0';
-          rprintf(FLOG, "%s Badly formed line in configuration file: %s\n",
+          rprintf(FLOG, "%s Badly formed line in config file: %s\n",
                    func, bufr );
           return( False );
           }
@@ -261,7 +264,7 @@ static BOOL Section( FILE *InFile, BOOL (*sfunc)(char *) )
     }
 
   /* We arrive here if we've met the EOF before the closing bracket. */
-  rprintf(FLOG, "%s Unexpected EOF in the configuration file: %s\n", func, bufr );
+  rprintf(FLOG, "%s Unexpected EOF in the config file: %s\n", func, bufr );
   return( False );
   } /* Section */
 
@@ -315,13 +318,12 @@ static BOOL Parameter( FILE *InFile, BOOL (*pfunc)(char *, char *), int c )
       case '=':                 /* Equal sign marks end of param name. */
         if( 0 == end )              /* Don't allow an empty name.      */
           {
-          rprintf(FLOG, "%s Invalid parameter name in config. file.\n", func );
+          rprintf(FLOG, "%s Invalid parameter name in config file.\n", func );
           return( False );
           }
         bufr[end++] = '\0';         /* Mark end of string & advance.   */
-        i       = end;              /* New string starts here.         */
-        vstart  = end;              /* New string is parameter value.  */
-        bufr[i] = '\0';             /* New string is nul, for now.     */
+        i = vstart = end;           /* New string starts here.         */
+        c = EatWhitespace(InFile);
         break;
 
       case '\n':                /* Find continuation char, else error. */
@@ -329,7 +331,7 @@ static BOOL Parameter( FILE *InFile, BOOL (*pfunc)(char *, char *), int c )
         if( i < 0 )
           {
           bufr[end] = '\0';
-          rprintf(FLOG, "%s Ignoring badly formed line in configuration file: %s\n",
+          rprintf(FLOG, "%s Ignoring badly formed line in config file: %s\n",
                    func, bufr );
           return( True );
           }
@@ -342,6 +344,19 @@ static BOOL Parameter( FILE *InFile, BOOL (*pfunc)(char *, char *), int c )
         bufr[i] = '\0';
         rprintf(FLOG, "%s Unexpected end-of-file at: %s\n", func, bufr );
         return( True );
+
+      case ' ':
+      case '\t':
+        /* A directive divides at the first space or tab. */
+        if (*bufr == '&') {
+          bufr[end++] = '\0';
+          i = vstart = end;
+          c = EatWhitespace(InFile);
+          if (c == '=')
+            c = EatWhitespace(InFile);
+          break;
+        }
+        /* FALL THROUGH */
 
       default:
         if( isspace( c ) )     /* One ' ' per whitespace region.       */
@@ -360,7 +375,6 @@ static BOOL Parameter( FILE *InFile, BOOL (*pfunc)(char *, char *), int c )
     }
 
   /* Now parse the value. */
-  c = EatWhitespace( InFile );  /* Again, trim leading whitespace. */
   while( (EOF !=c) && (c > 0) )
     {
 
@@ -406,7 +420,88 @@ static BOOL Parameter( FILE *InFile, BOOL (*pfunc)(char *, char *), int c )
   return( pfunc( bufr, &bufr[vstart] ) );   /* Pass name & value to pfunc().  */
   } /* Parameter */
 
-static BOOL Parse( FILE *InFile,
+static int name_cmp(const void *n1, const void *n2)
+{
+    return strcmp(*(char * const *)n1, *(char * const *)n2);
+}
+
+static int include_config(char *include, int manage_globals)
+{
+    STRUCT_STAT sb;
+    char *match = manage_globals ? "*.conf" : "*.inc";
+    int ret;
+
+    if (do_stat(include, &sb) < 0) {
+	rsyserr(FLOG, errno, "unable to stat config file \"%s\"", include);
+	return 0;
+    }
+
+    if (S_ISREG(sb.st_mode)) {
+	if (manage_globals && the_sfunc)
+	    the_sfunc("]push");
+	ret = pm_process(include, the_sfunc, the_pfunc);
+	if (manage_globals && the_sfunc)
+	    the_sfunc("]pop");
+    } else if (S_ISDIR(sb.st_mode)) {
+	char buf[MAXPATHLEN], **bpp;
+	item_list conf_list;
+	struct dirent *di;
+	size_t j;
+	DIR *d;
+
+	if (!(d = opendir(include))) {
+	    rsyserr(FLOG, errno, "unable to open config dir \"%s\"", include);
+	    return 0;
+	}
+
+	memset(&conf_list, 0, sizeof conf_list);
+
+	while ((di = readdir(d)) != NULL) {
+	    char *dname = d_name(di);
+	    if (!wildmatch(match, dname))
+		continue;
+	    bpp = EXPAND_ITEM_LIST(&conf_list, char *, 32);
+	    pathjoin(buf, sizeof buf, include, dname);
+	    *bpp = strdup(buf);
+	}
+	closedir(d);
+
+	if (!(bpp = conf_list.items))
+	    return 1;
+
+	if (conf_list.count > 1)
+	    qsort(bpp, conf_list.count, sizeof (char *), name_cmp);
+
+	for (j = 0, ret = 1; j < conf_list.count; j++) {
+	    if (manage_globals && the_sfunc)
+		the_sfunc(j == 0 ? "]push" : "]reset");
+	    if ((ret = pm_process(bpp[j], the_sfunc, the_pfunc)) != 1)
+		break;
+	}
+
+	if (manage_globals && the_sfunc)
+	    the_sfunc("]pop");
+
+	for (j = 0; j < conf_list.count; j++)
+	    free(bpp[j]);
+	free(bpp);
+    } else
+	ret = 0;
+
+    return ret;
+}
+
+static int parse_directives(char *name, char *val)
+{
+    if (strcasecmp(name, "&include") == 0)
+        return include_config(val, 1);
+    if (strcasecmp(name, "&merge") == 0)
+        return include_config(val, 0);
+    rprintf(FLOG, "Unknown directive: %s.\n", name);
+    return 0;
+}
+
+static int Parse( FILE *InFile,
                    BOOL (*sfunc)(char *),
                    BOOL (*pfunc)(char *, char *) )
   /* ------------------------------------------------------------------------ **
@@ -418,7 +513,8 @@ static BOOL Parse( FILE *InFile,
    *          pfunc   - Function to be called when a parameter is scanned.
    *                    See Parameter().
    *
-   *  Output: True if the file was successfully scanned, else False.
+   *  Output: 1 if the file was successfully scanned, 2 if the file was
+   *  scanned until a section header with no section function, else 0.
    *
    *  Notes:  The input can be viewed in terms of 'lines'.  There are four
    *          types of lines:
@@ -427,7 +523,7 @@ static BOOL Parse( FILE *InFile,
    *                         The remainder of the line is ignored.
    *            Section    - First non-whitespace character is a '['.
    *            Parameter  - The default case.
-   * 
+   *
    * ------------------------------------------------------------------------ **
    */
   {
@@ -448,29 +544,39 @@ static BOOL Parse( FILE *InFile,
         break;
 
       case '[':                         /* Section Header. */
-	      if (!sfunc) return True;
-	      if( !Section( InFile, sfunc ) )
-		      return( False );
-	      c = EatWhitespace( InFile );
-	      break;
+        if (!sfunc)
+          return 2;
+        if( !Section( InFile, sfunc ) )
+          return 0;
+        c = EatWhitespace( InFile );
+        break;
 
       case '\\':                        /* Bogus backslash. */
         c = EatWhitespace( InFile );
         break;
 
+      case '&':                         /* Handle directives */
+        the_sfunc = sfunc;
+        the_pfunc = pfunc;
+        c = Parameter( InFile, parse_directives, c );
+        if (c != 1)
+          return c;
+        c = EatWhitespace( InFile );
+        break;
+
       default:                          /* Parameter line. */
         if( !Parameter( InFile, pfunc, c ) )
-          return( False );
+          return 0;
         c = EatWhitespace( InFile );
         break;
       }
     }
-  return( True );
+  return 1;
   } /* Parse */
 
 static FILE *OpenConfFile( char *FileName )
   /* ------------------------------------------------------------------------ **
-   * Open a configuration file.
+   * Open a config file.
    *
    *  Input:  FileName  - The pathname of the config file to be opened.
    *
@@ -485,21 +591,21 @@ static FILE *OpenConfFile( char *FileName )
 
   if( NULL == FileName || 0 == *FileName )
     {
-    rprintf(FLOG, "%s No configuration filename specified.\n", func);
+    rprintf(FLOG, "%s No config filename specified.\n", func);
     return( NULL );
     }
 
   OpenedFile = fopen( FileName, "r" );
   if( NULL == OpenedFile )
     {
-    rsyserr(FLOG, errno, "unable to open configuration file \"%s\"",
+    rsyserr(FLOG, errno, "unable to open config file \"%s\"",
 	    FileName);
     }
 
   return( OpenedFile );
   } /* OpenConfFile */
 
-BOOL pm_process( char *FileName,
+int pm_process( char *FileName,
                  BOOL (*sfunc)(char *),
                  BOOL (*pfunc)(char *, char *) )
   /* ------------------------------------------------------------------------ **
@@ -511,7 +617,8 @@ BOOL pm_process( char *FileName,
    *          pfunc     - A pointer to a function that will be called when
    *                      a parameter name and value are discovered.
    *
-   *  Output: TRUE if the file was successfully parsed, else FALSE.
+   *  Output: 1 if the file was successfully parsed, 2 if parsing ended at a
+   *  section header w/o a section function, else 0.
    *
    * ------------------------------------------------------------------------ **
    */
@@ -549,10 +656,10 @@ BOOL pm_process( char *FileName,
   if( !result )                               /* Generic failure. */
     {
     rprintf(FLOG, "%s Failed.  Error returned from params.c:parse().\n", func);
-    return( False );
+    return 0;
     }
 
-  return( True );                             /* Generic success. */
+  return result;
   } /* pm_process */
 
 /* -------------------------------------------------------------------------- */

@@ -1,6 +1,6 @@
 /* Inline functions for rsync.
  *
- * Copyright (C) 2007-2008 Wayne Davison
+ * Copyright (C) 2007-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,6 +35,14 @@ realloc_xbuf(xbuf *xb, size_t sz)
 	xb->size = sz;
 }
 
+static inline void
+free_xbuf(xbuf *xb)
+{
+	if (xb->buf)
+		free(xb->buf);
+	memset(xb, 0, sizeof (xbuf));
+}
+
 static inline int
 to_wire_mode(mode_t mode)
 {
@@ -67,44 +75,32 @@ d_name(struct dirent *di)
 #endif
 }
 
-static inline int
-isDigit(const char *ptr)
+static inline void
+init_stat_x(stat_x *sx_p)
 {
-	return isdigit(*(unsigned char *)ptr);
+#ifdef SUPPORT_ACLS
+	sx_p->acc_acl = sx_p->def_acl = NULL;
+#endif
+#ifdef SUPPORT_XATTRS
+	sx_p->xattr = NULL;
+#endif
 }
 
-static inline int
-isPrint(const char *ptr)
+static inline void
+free_stat_x(stat_x *sx_p)
 {
-	return isprint(*(unsigned char *)ptr);
-}
-
-static inline int
-isSpace(const char *ptr)
-{
-	return isspace(*(unsigned char *)ptr);
-}
-
-static inline int
-isLower(const char *ptr)
-{
-	return islower(*(unsigned char *)ptr);
-}
-
-static inline int
-isUpper(const char *ptr)
-{
-	return isupper(*(unsigned char *)ptr);
-}
-
-static inline int
-toLower(const char *ptr)
-{
-	return tolower(*(unsigned char *)ptr);
-}
-
-static inline int
-toUpper(const char *ptr)
-{
-	return toupper(*(unsigned char *)ptr);
+#ifdef SUPPORT_ACLS
+    {
+	extern int preserve_acls;
+	if (preserve_acls)
+		free_acl(sx_p);
+    }
+#endif
+#ifdef SUPPORT_XATTRS
+    {
+	extern int preserve_xattrs;
+	if (preserve_xattrs)
+		free_xattr(sx_p);
+    }
+#endif
 }

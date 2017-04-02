@@ -804,7 +804,7 @@ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct
     /*
      * Now mimic bpc_mkstemp() above
      */
-    if ( !get_tmpname(tmpName, fileName) || !bpc_mktemp(tmpName) ) {
+    if ( !get_tmpname(tmpName, fileName, 0) || !bpc_mktemp(tmpName) ) {
         bpc_logErrf("bpc_sysCall_checkFileMatch(%s): tmp name failed\n", fileName);
         return -1;
     }
@@ -1406,13 +1406,13 @@ int bpc_rename(const char *oldName, const char *newName)
     bpc_attrib_file *file, *fileNew;
     int oldIsTemp, fileAttrChanged = 0;
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_rename(%s, %s)\n", oldName, newName);
-
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)oldName, 0, 0)) ) {
         if ( LogLevel >= 4 ) bpc_logMsgf("bpc_rename: %s doesn't exist\n", oldName);
         errno = ENOENT;
         return -1;
     }
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_rename(%s, %s); oldIsTemp = %d\n", oldName, newName, file->isTemp);
+
     if ( !am_generator ) {
         /*
          * We don't do renames on the receiver, since it's too hard to keep attribute updates on
@@ -1500,7 +1500,9 @@ int bpc_rename(const char *oldName, const char *newName)
         }
     }
     if ( !fileNew || fileAttrChanged ) {
-        bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, 1);
+	if ( oldIsTemp ) {
+	    bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, 1);
+	}
         bpc_attribCache_setFile(&acNew, (char*)newName, file, 0);
     }
     bpc_attribCache_deleteFile(&acNew, (char*)oldName);
@@ -1738,6 +1740,31 @@ ssize_t bpc_readlink(const char *fileName, char *buffer, size_t bufferSize)
                                     fileName, bufferSize);
 
     return bpc_fileReadAll(&acNew, (char*)fileName, buffer, bufferSize);
+}
+
+int bpc_access(const char *fileName, int mode)
+{
+    bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0);
+
+    bpc_logMsgf("bpc_access(%s, %d) -> %d\n", fileName, mode, file ? 0 : -1);
+    if ( !file ) {
+        errno = ENOENT;
+        return -1;
+    } else {
+        return 0;
+    }
+}
+
+void bpc_tmpNameFlagSet(const char *tmpName)
+{
+    bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)tmpName, 0, 0);
+
+    if ( file && !file->isTemp ) {
+        file->isTemp = 1;
+        if ( file->digest.len > 0 ) {
+            bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, -1);
+        }
+    }
 }
 
 int bpc_chdir(const char *dirName)

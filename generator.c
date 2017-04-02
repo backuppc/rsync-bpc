@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,8 +21,9 @@
  */
 
 #include "rsync.h"
+#include "inums.h"
+#include "ifuncs.h"
 
-extern int verbose;
 extern int dry_run;
 extern int do_xfers;
 extern int stdout_format_has_i;
@@ -31,7 +32,6 @@ extern int am_root;
 extern int am_server;
 extern int am_daemon;
 extern int inc_recurse;
-extern int do_progress;
 extern int relative_paths;
 extern int implied_dirs;
 extern int keep_dirlinks;
@@ -48,13 +48,16 @@ extern int delete_mode;
 extern int delete_before;
 extern int delete_during;
 extern int delete_after;
+extern int missing_args;
 extern int msgdone_cnt;
 extern int ignore_errors;
 extern int remove_source_files;
 extern int delay_updates;
 extern int update_only;
+extern int human_readable;
 extern int ignore_existing;
 extern int ignore_non_existing;
+extern int want_xattr_optim;
 extern int inplace;
 extern int append_mode;
 extern int make_backups;
@@ -67,42 +70,37 @@ extern int io_error;
 extern int flist_eof;
 extern int allowed_lull;
 extern int sock_f_out;
-extern int ignore_timeout;
 extern int protocol_version;
 extern int file_total;
 extern int fuzzy_basis;
 extern int always_checksum;
 extern int checksum_len;
 extern char *partial_dir;
-extern char *basis_dir[MAX_BASIS_DIRS+1];
 extern int compare_dest;
 extern int copy_dest;
 extern int link_dest;
 extern int whole_file;
 extern int list_only;
 extern int read_batch;
+extern int write_batch;
 extern int safe_symlinks;
 extern long block_size; /* "long" because popt can't set an int32. */
 extern int unsort_ndx;
 extern int max_delete;
 extern int force_delete;
 extern int one_file_system;
-extern struct stats stats;
+extern int skipped_deletes;
 extern dev_t filesystem_dev;
 extern mode_t orig_umask;
 extern uid_t our_uid;
-extern char *backup_dir;
-extern char *backup_suffix;
-extern int backup_suffix_len;
+extern char *tmpdir;
+extern char *basis_dir[MAX_BASIS_DIRS+1];
 extern struct file_list *cur_flist, *first_flist, *dir_flist;
-extern struct filter_list_struct daemon_filter_list;
+extern filter_rule_list filter_list, daemon_filter_list;
 
-int ignore_perishable = 0;
-int non_perishable_cnt = 0;
 int maybe_ATTRS_REPORT = 0;
 
 static dev_t dev_zero;
-static int deletion_count = 0; /* used to implement --max-delete */
 static int deldelay_size = 0, deldelay_cnt = 0;
 static char *deldelay_buf = NULL;
 static int deldelay_fd = -1;
@@ -113,201 +111,18 @@ static int need_retouch_dir_times;
 static int need_retouch_dir_perms;
 static const char *solo_file = NULL;
 
-/* For calling delete_item() and delete_dir_contents(). */
-#define DEL_NO_UID_WRITE 	(1<<0) /* file/dir has our uid w/o write perm */
-#define DEL_RECURSE		(1<<1) /* if dir, delete all contents */
-#define DEL_DIR_IS_EMPTY	(1<<2) /* internal delete_FUNCTIONS use only */
-#define DEL_FOR_FILE		(1<<3) /* making room for a replacement file */
-#define DEL_FOR_DIR		(1<<4) /* making room for a replacement dir */
-#define DEL_FOR_SYMLINK 	(1<<5) /* making room for a replacement symlink */
-#define DEL_FOR_DEVICE		(1<<6) /* making room for a replacement device */
-#define DEL_FOR_SPECIAL 	(1<<7) /* making room for a replacement special */
-
-#define DEL_MAKE_ROOM (DEL_FOR_FILE|DEL_FOR_DIR|DEL_FOR_SYMLINK|DEL_FOR_DEVICE|DEL_FOR_SPECIAL)
-
 enum nonregtype {
     TYPE_DIR, TYPE_SPECIAL, TYPE_DEVICE, TYPE_SYMLINK
 };
 
-enum delret {
-    DR_SUCCESS = 0, DR_FAILURE, DR_AT_LIMIT, DR_NOT_EMPTY
-};
-
 /* Forward declarations. */
-static enum delret delete_dir_contents(char *fname, uint16 flags);
 #ifdef SUPPORT_HARD_LINKS
 static void handle_skipped_hlink(struct file_struct *file, int itemizing,
 				 enum logcode code, int f_out);
 #endif
 
-static int is_backup_file(char *fn)
-{
-	int k = strlen(fn) - backup_suffix_len;
-	return k > 0 && strcmp(fn+k, backup_suffix) == 0;
-}
-
-/* Delete a file or directory.  If DEL_RECURSE is set in the flags, this will
- * delete recursively.
- *
- * Note that fbuf must point to a MAXPATHLEN buffer if the mode indicates it's
- * a directory! (The buffer is used for recursion, but returned unchanged.)
- */
-static enum delret delete_item(char *fbuf, uint16 mode, uint16 flags)
-{
-	enum delret ret;
-	char *what;
-	int ok;
-
-	if (verbose > 2) {
-		rprintf(FINFO, "delete_item(%s) mode=%o flags=%d\n",
-			fbuf, (int)mode, (int)flags);
-	}
-
-	if (flags & DEL_NO_UID_WRITE)
-		do_chmod(fbuf, mode | S_IWUSR);
-
-	if (S_ISDIR(mode) && !(flags & DEL_DIR_IS_EMPTY)) {
-		/* This only happens on the first call to delete_item() since
-		 * delete_dir_contents() always calls us w/DEL_DIR_IS_EMPTY. */
-		ignore_perishable = 1;
-		/* If DEL_RECURSE is not set, this just reports emptiness. */
-		ret = delete_dir_contents(fbuf, flags);
-		ignore_perishable = 0;
-		if (ret == DR_NOT_EMPTY || ret == DR_AT_LIMIT)
-			goto check_ret;
-		/* OK: try to delete the directory. */
-	}
-
-	if (!(flags & DEL_MAKE_ROOM) && max_delete >= 0 && ++deletion_count > max_delete)
-		return DR_AT_LIMIT;
-
-	if (S_ISDIR(mode)) {
-		what = "rmdir";
-		ok = do_rmdir(fbuf) == 0;
-	} else if (make_backups > 0 && (backup_dir || !is_backup_file(fbuf))) {
-		what = "make_backup";
-		ok = make_backup(fbuf);
-	} else {
-		what = "unlink";
-		ok = robust_unlink(fbuf) == 0;
-	}
-
-	if (ok) {
-		if (!(flags & DEL_MAKE_ROOM))
-			log_delete(fbuf, mode);
-		ret = DR_SUCCESS;
-	} else {
-		if (S_ISDIR(mode) && errno == ENOTEMPTY) {
-			rprintf(FINFO, "cannot delete non-empty directory: %s\n",
-				fbuf);
-			ret = DR_NOT_EMPTY;
-		} else if (errno != ENOENT) {
-			rsyserr(FERROR, errno, "delete_file: %s(%s) failed",
-				what, fbuf);
-			ret = DR_FAILURE;
-		} else {
-			deletion_count--;
-			ret = DR_SUCCESS;
-		}
-	}
-
-  check_ret:
-	if (ret != DR_SUCCESS && flags & DEL_MAKE_ROOM) {
-		const char *desc;
-		switch (flags & DEL_MAKE_ROOM) {
-		case DEL_FOR_FILE: desc = "regular file"; break;
-		case DEL_FOR_DIR: desc = "directory"; break;
-		case DEL_FOR_SYMLINK: desc = "symlink"; break;
-		case DEL_FOR_DEVICE: desc = "device file"; break;
-		case DEL_FOR_SPECIAL: desc = "special file"; break;
-		default: exit_cleanup(RERR_UNSUPPORTED); /* IMPOSSIBLE */
-		}
-		rprintf(FERROR_XFER, "could not make way for new %s: %s\n",
-			desc, fbuf);
-	}
-	return ret;
-}
-
-/* The directory is about to be deleted: if DEL_RECURSE is given, delete all
- * its contents, otherwise just checks for content.  Returns DR_SUCCESS or
- * DR_NOT_EMPTY.  Note that fname must point to a MAXPATHLEN buffer!  (The
- * buffer is used for recursion, but returned unchanged.)
- */
-static enum delret delete_dir_contents(char *fname, uint16 flags)
-{
-	struct file_list *dirlist;
-	enum delret ret;
-	unsigned remainder;
-	void *save_filters;
-	int j, dlen;
-	char *p;
-
-	if (verbose > 3) {
-		rprintf(FINFO, "delete_dir_contents(%s) flags=%d\n",
-			fname, flags);
-	}
-
-	dlen = strlen(fname);
-	save_filters = push_local_filters(fname, dlen);
-
-	non_perishable_cnt = 0;
-	dirlist = get_dirlist(fname, dlen, 0);
-	ret = non_perishable_cnt ? DR_NOT_EMPTY : DR_SUCCESS;
-
-	if (!dirlist->used)
-		goto done;
-
-	if (!(flags & DEL_RECURSE)) {
-		ret = DR_NOT_EMPTY;
-		goto done;
-	}
-
-	p = fname + dlen;
-	if (dlen != 1 || *fname != '/')
-		*p++ = '/';
-	remainder = MAXPATHLEN - (p - fname);
-
-	/* We do our own recursion, so make delete_item() non-recursive. */
-	flags = (flags & ~(DEL_RECURSE|DEL_MAKE_ROOM|DEL_NO_UID_WRITE))
-	      | DEL_DIR_IS_EMPTY;
-
-	for (j = dirlist->used; j--; ) {
-		struct file_struct *fp = dirlist->files[j];
-
-		if (fp->flags & FLAG_MOUNT_DIR && S_ISDIR(fp->mode)) {
-			if (verbose > 1) {
-				rprintf(FINFO,
-				    "mount point, %s, pins parent directory\n",
-				    f_name(fp, NULL));
-			}
-			ret = DR_NOT_EMPTY;
-			continue;
-		}
-
-		strlcpy(p, fp->basename, remainder);
-		if (!(fp->mode & S_IWUSR) && !am_root && fp->flags & FLAG_OWNED_BY_US)
-			do_chmod(fname, fp->mode | S_IWUSR);
-		/* Save stack by recursing to ourself directly. */
-		if (S_ISDIR(fp->mode)) {
-			if (delete_dir_contents(fname, flags | DEL_RECURSE) != DR_SUCCESS)
-				ret = DR_NOT_EMPTY;
-		}
-		if (delete_item(fname, fp->mode, flags) != DR_SUCCESS)
-			ret = DR_NOT_EMPTY;
-	}
-
-	fname[dlen] = '\0';
-
-  done:
-	flist_free(dirlist);
-	pop_local_filters(save_filters);
-
-	if (ret == DR_NOT_EMPTY) {
-		rprintf(FINFO, "cannot delete non-empty directory: %s\n",
-			fname);
-	}
-	return ret;
-}
+#define EARLY_DELAY_DONE_MSG() (!delay_updates)
+#define EARLY_DELETE_DONE_MSG() (!(delete_during == 2 || delete_after))
 
 static int start_delete_delay_temp(void)
 {
@@ -315,7 +130,7 @@ static int start_delete_delay_temp(void)
 	int save_dry_run = dry_run;
 
 	dry_run = 0;
-	if (!get_tmpname(fnametmp, "deldelay")
+	if (!get_tmpname(fnametmp, "deldelay", False)
 	 || (deldelay_fd = do_mkstemp(fnametmp, 0600, NULL)) < 0) {
 		rprintf(FINFO, "NOTE: Unable to create delete-delay temp file%s.\n",
 			inc_recurse ? "" : " -- switching to --delete-after");
@@ -469,13 +284,13 @@ static void delete_in_dir(char *fbuf, struct file_struct *file, dev_t *fs_dev)
 		return;
 	}
 
-	if (verbose > 2)
+	if (DEBUG_GTE(DEL, 2))
 		rprintf(FINFO, "delete_in_dir(%s)\n", fbuf);
 
 	if (allowed_lull)
-		maybe_send_keepalive();
+		maybe_send_keepalive(time(NULL), MSK_ALLOW_FLUSH);
 
-	if (io_error && !ignore_errors) {
+	if (io_error & IOERR_GENERAL && !ignore_errors) {
 		if (already_warned)
 			return;
 		rprintf(FINFO,
@@ -503,7 +318,7 @@ static void delete_in_dir(char *fbuf, struct file_struct *file, dev_t *fs_dev)
 		if (!F_IS_ACTIVE(fp))
 			continue;
 		if (fp->flags & FLAG_MOUNT_DIR && S_ISDIR(fp->mode)) {
-			if (verbose > 1)
+			if (INFO_GTE(MOUNT, 1))
 				rprintf(FINFO, "cannot delete mount point: %s\n",
 					f_name(fp, NULL));
 			continue;
@@ -542,6 +357,9 @@ static void do_delete_pass(void)
 	for (j = 0; j < cur_flist->used; j++) {
 		struct file_struct *file = cur_flist->sorted[j];
 
+		if (!F_IS_ACTIVE(file))
+			continue;
+
 		f_name(file, fbuf);
 
 		if (!(file->flags & FLAG_CONTENT_DIR)) {
@@ -549,7 +367,7 @@ static void do_delete_pass(void)
 			continue;
 		}
 
-		if (verbose > 1 && file->flags & FLAG_TOP_DIR)
+		if (DEBUG_GTE(DEL, 1) && file->flags & FLAG_TOP_DIR)
 			rprintf(FINFO, "deleting in %s\n", fbuf);
 
 		if (link_stat(fbuf, &st, keep_dirlinks) < 0
@@ -560,7 +378,7 @@ static void do_delete_pass(void)
 	}
 	delete_in_dir(NULL, NULL, &dev_zero);
 
-	if (do_progress && !am_server)
+	if (INFO_GTE(FLIST, 2) && !am_server)
 		rprintf(FINFO, "                    \r");
 }
 
@@ -571,6 +389,10 @@ static inline int time_differs(struct file_struct *file, stat_x *sxp)
 
 static inline int perms_differ(struct file_struct *file, stat_x *sxp)
 {
+    /*
+        fprintf(stderr, "perms_differ(%s, %d): modes = (0%o, 0%o)\n",
+                                file->basename, preserve_perms, file->mode, sxp->st.st_mode);
+    */
 	if (preserve_perms)
 		return !BITS_EQUAL(sxp->st.st_mode, file->mode, CHMOD_BITS);
 
@@ -621,6 +443,11 @@ static inline int xattrs_differ(const char *fname, struct file_struct *file, sta
 
 int unchanged_attrs(const char *fname, struct file_struct *file, stat_x *sxp)
 {
+    /*
+        fprintf(stderr, "unchanged_attrs(%s): mode (%o,%o), mtime (%lu,%lu), uid (%u,%u)\n",
+                                fname, file->mode, sxp->st.st_mode, file->modtime, sxp->st.st_mtime,
+                                (uid_t)F_OWNER(file), sxp->st.st_uid);
+    */
 	if (S_ISLNK(file->mode)) {
 #ifdef CAN_SET_SYMLINK_TIMES
 		if (preserve_times & PRESERVE_LINK_TIMES && time_differs(file, sxp))
@@ -723,7 +550,7 @@ void itemize(const char *fnamecmp, struct file_struct *file, int ndx, int statre
 	}
 
 	iflags &= 0xffff;
-	if ((iflags & (SIGNIFICANT_ITEM_FLAGS|ITEM_REPORT_XATTR) || verbose > 1
+	if ((iflags & (SIGNIFICANT_ITEM_FLAGS|ITEM_REPORT_XATTR) || INFO_GTE(NAME, 2)
 	  || stdout_format_has_i > 1 || (xname && *xname)) && !read_batch) {
 		if (protocol_version >= 29) {
 			if (ndx >= 0)
@@ -736,13 +563,15 @@ void itemize(const char *fnamecmp, struct file_struct *file, int ndx, int statre
 #ifdef SUPPORT_XATTRS
 			if (preserve_xattrs && do_xfers
 			 && iflags & (ITEM_REPORT_XATTR|ITEM_TRANSFER)) {
-				send_xattr_request(NULL, file,
-					iflags & ITEM_REPORT_XATTR ? sock_f_out : -1);
+				int fd = iflags & ITEM_REPORT_XATTR
+				      && !(want_xattr_optim && BITS_SET(iflags, ITEM_XNAME_FOLLOWS|ITEM_LOCAL_CHANGE))
+				       ? sock_f_out : -1;
+				send_xattr_request(NULL, file, fd);
 			}
 #endif
 		} else if (ndx >= 0) {
 			enum logcode code = logfile_format_has_i ? FINFO : FCLIENT;
-			log_item(code, file, &stats, iflags, xname);
+			log_item(code, file, iflags, xname);
 		}
 	}
 }
@@ -751,35 +580,49 @@ void itemize(const char *fnamecmp, struct file_struct *file, int ndx, int statre
 /* Perform our quick-check heuristic for determining if a file is unchanged. */
 int unchanged_file(char *fn, struct file_struct *file, STRUCT_STAT *st)
 {
-	if (st->st_size != F_LENGTH(file))
+	if (st->st_size != F_LENGTH(file)) {
+                /* fprintf(stderr, "unchanged_file(%s): size changed (%lu vs %lu)\n", fn, st->st_size, F_LENGTH(file)); */
 		return 0;
+        }
 
-        if ((st->st_nlink <= 1 && F_IS_HLINKED(file)) || (st->st_nlink > 1 && !F_IS_HLINKED(file)))
+        if ((st->st_nlink <= 1 && F_IS_HLINKED(file)) || (st->st_nlink > 1 && !F_IS_HLINKED(file))) {
+                /* fprintf(stderr, "unchanged_file(%s): links changed (nlink %lu, isHlink %d)\n", fn, st->st_nlink, F_IS_HLINKED(file)); */
                 return 0;
+        }
 
 	/* if always checksum is set then we use the checksum instead
 	   of the file time to determine whether to sync */
 	if (always_checksum > 0 && S_ISREG(st->st_mode)) {
 		char sum[MAX_DIGEST_LEN];
-                int csumError = file_checksum(fn, sum, st->st_size);
+		int csumError = file_checksum(fn, st, sum);
             /*
                 {
                     uchar *p = (uchar*)F_SUM(file);
-                    fprintf(stderr, "checksum(%s): %s %02x%02x%02x%02x... vs %02x%02x%02x%02x...\n",
+                    fprintf(stderr, "unchanged_file(%s): %s (err=%d) %02x%02x%02x%02x... vs %02x%02x%02x%02x...\n",
                                     fn, memcmp(sum, F_SUM(file), checksum_len) ? "neq" : "equal",
-                                    p[0], p[1], p[2], p[3],
+                                    csumError, p[0], p[1], p[2], p[3],
                                     sum[0] & 0xff, sum[1] & 0xff, sum[2] & 0xff, sum[3] & 0xff);
                 }
             */
 		if ( csumError || memcmp(sum, F_SUM(file), checksum_len) ) return 0;
 	}
 
-	if (size_only > 0)
+	if (size_only > 0) {
+                /* fprintf(stderr, "unchanged_file(%s): size_only is %d\n", fn, size_only); */
 		return 1;
+        }
 
-	if (ignore_times)
+	if (ignore_times) {
+                /* fprintf(stderr, "unchanged_file(%s): ignore_times is set\n", fn); */
 		return 0;
+        }
 
+        if ( preserve_perms && !BITS_EQUAL(st->st_mode, file->mode, CHMOD_BITS) ) {
+                /* fprintf(stderr, "unchanged_file(%s): permission changed (0%o, 0%o)\n", fn, st->st_mode, file->mode); */
+		return 0;
+	}
+
+        /* fprintf(stderr, "unchanged_file(%s): returning cmd_time(%ld, %ld)\n", fn, st->st_mtime, file->modtime); */
 	return cmp_time(st->st_mtime, file->modtime) == 0;
 }
 
@@ -860,11 +703,11 @@ static void sum_sizes_sqroot(struct sum_struct *sum, int64 len)
 	if ((int64)sum->count != l)
 		sum->count = -1;
 
-	if (sum->count && verbose > 2) {
+	if (sum->count && DEBUG_GTE(DELTASUM, 2)) {
 		rprintf(FINFO,
-			"count=%.0f rem=%ld blength=%ld s2length=%d flength=%.0f\n",
-			(double)sum->count, (long)sum->remainder, (long)sum->blength,
-			sum->s2length, (double)sum->flength);
+			"count=%s rem=%ld blength=%ld s2length=%d flength=%s\n",
+			big_num(sum->count), (long)sum->remainder, (long)sum->blength,
+			sum->s2length, big_num(sum->flength));
 	}
 }
 
@@ -912,10 +755,10 @@ static int generate_and_send_sums(int fd, OFF_T len, int f_out, int f_copy)
 		sum1 = get_checksum1(map, n1);
 		get_checksum2(map, n1, sum2);
 
-		if (verbose > 3) {
+		if (DEBUG_GTE(DELTASUM, 3)) {
 			rprintf(FINFO,
-				"chunk[%.0f] offset=%.0f len=%ld sum1=%08lx\n",
-				(double)i, (double)offset - n1, (long)n1,
+				"chunk[%s] offset=%s len=%ld sum1=%08lx\n",
+				big_num(i), big_num(offset - n1), (long)n1,
 				(unsigned long)sum1);
 		}
 		write_int(f_out, sum1);
@@ -930,56 +773,81 @@ static int generate_and_send_sums(int fd, OFF_T len, int f_out, int f_copy)
 
 
 /* Try to find a filename in the same dir as "fname" with a similar name. */
-static int find_fuzzy(struct file_struct *file, struct file_list *dirlist)
+static struct file_struct *find_fuzzy(struct file_struct *file, struct file_list *dirlist_array[], uchar *fnamecmp_type_ptr)
 {
 	int fname_len, fname_suf_len;
 	const char *fname_suf, *fname = file->basename;
 	uint32 lowest_dist = 25 << 16; /* ignore a distance greater than 25 */
-	int j, lowest_j = -1;
+	int i, j;
+	struct file_struct *lowest_fp = NULL;
 
 	fname_len = strlen(fname);
 	fname_suf = find_filename_suffix(fname, fname_len, &fname_suf_len);
 
-	for (j = 0; j < dirlist->used; j++) {
-		struct file_struct *fp = dirlist->files[j];
-		const char *suf, *name;
-		int len, suf_len;
-		uint32 dist;
+	/* Try to find an exact size+mtime match first. */
+	for (i = 0; i < fuzzy_basis; i++) {
+		struct file_list *dirlist = dirlist_array[i];
 
-		if (!S_ISREG(fp->mode) || !F_LENGTH(fp)
-		 || fp->flags & FLAG_FILE_SENT)
+		if (!dirlist)
 			continue;
 
-		name = fp->basename;
+		for (j = 0; j < dirlist->used; j++) {
+			struct file_struct *fp = dirlist->files[j];
 
-		if (F_LENGTH(fp) == F_LENGTH(file)
-		    && cmp_time(fp->modtime, file->modtime) == 0) {
-			if (verbose > 4) {
-				rprintf(FINFO,
-					"fuzzy size/modtime match for %s\n",
-					name);
+			if (!F_IS_ACTIVE(fp))
+				continue;
+
+			if (!S_ISREG(fp->mode) || !F_LENGTH(fp) || fp->flags & FLAG_FILE_SENT)
+				continue;
+
+			if (F_LENGTH(fp) == F_LENGTH(file) && cmp_time(fp->modtime, file->modtime) == 0) {
+				if (DEBUG_GTE(FUZZY, 2))
+					rprintf(FINFO, "fuzzy size/modtime match for %s\n", f_name(fp, NULL));
+				*fnamecmp_type_ptr = FNAMECMP_FUZZY + i;
+				return fp;
 			}
-			return j;
-		}
 
-		len = strlen(name);
-		suf = find_filename_suffix(name, len, &suf_len);
-
-		dist = fuzzy_distance(name, len, fname, fname_len);
-		/* Add some extra weight to how well the suffixes match. */
-		dist += fuzzy_distance(suf, suf_len, fname_suf, fname_suf_len)
-		      * 10;
-		if (verbose > 4) {
-			rprintf(FINFO, "fuzzy distance for %s = %d.%05d\n",
-				name, (int)(dist>>16), (int)(dist&0xFFFF));
-		}
-		if (dist <= lowest_dist) {
-			lowest_dist = dist;
-			lowest_j = j;
 		}
 	}
 
-	return lowest_j;
+	for (i = 0; i < fuzzy_basis; i++) {
+		struct file_list *dirlist = dirlist_array[i];
+
+		if (!dirlist)
+			continue;
+
+		for (j = 0; j < dirlist->used; j++) {
+			struct file_struct *fp = dirlist->files[j];
+			const char *suf, *name;
+			int len, suf_len;
+			uint32 dist;
+
+			if (!F_IS_ACTIVE(fp))
+				continue;
+
+			if (!S_ISREG(fp->mode) || !F_LENGTH(fp) || fp->flags & FLAG_FILE_SENT)
+				continue;
+
+			name = fp->basename;
+			len = strlen(name);
+			suf = find_filename_suffix(name, len, &suf_len);
+
+			dist = fuzzy_distance(name, len, fname, fname_len);
+			/* Add some extra weight to how well the suffixes match. */
+			dist += fuzzy_distance(suf, suf_len, fname_suf, fname_suf_len) * 10;
+			if (DEBUG_GTE(FUZZY, 2)) {
+				rprintf(FINFO, "fuzzy distance for %s = %d.%05d\n",
+					f_name(fp, NULL), (int)(dist>>16), (int)(dist&0xFFFF));
+			}
+			if (dist <= lowest_dist) {
+				lowest_dist = dist;
+				lowest_fp = fp;
+				*fnamecmp_type_ptr = FNAMECMP_FUZZY + i;
+			}
+		}
+	}
+
+	return lowest_fp;
 }
 
 /* Copy a file found in our --copy-dest handling. */
@@ -1001,8 +869,8 @@ static int copy_altdest_file(const char *src, const char *dest, struct file_stru
 		copy_to = buf;
 	}
 	cleanup_set(copy_to, NULL, NULL, -1, -1);
-	if (copy_file(src, copy_to, fd_w, file->mode, 0) < 0) {
-		if (verbose) {
+	if (copy_file(src, copy_to, fd_w, file->mode) < 0) {
+		if (INFO_GTE(COPY, 1)) {
 			rsyserr(FINFO, errno, "copy_file %s => %s",
 				full_fname(src), copy_to);
 		}
@@ -1021,11 +889,15 @@ static int copy_altdest_file(const char *src, const char *dest, struct file_stru
 
 /* This is only called for regular files.  We return -2 if we've finished
  * handling the file, -1 if no dest-linking occurred, or a non-negative
- * value if we found an alternate basis file. */
+ * value if we found an alternate basis file.  If we're called with the
+ * find_exact_for_existing flag, the destination file already exists, so
+ * we only try to find an exact alt-dest match.  In this case, the returns
+ * are only -2 & -1 (both as above). */
 static int try_dests_reg(struct file_struct *file, char *fname, int ndx,
-			 char *cmpbuf, stat_x *sxp, int itemizing,
-			 enum logcode code)
+			 char *cmpbuf, stat_x *sxp, int find_exact_for_existing,
+			 int itemizing, enum logcode code)
 {
+	STRUCT_STAT real_st = sxp->st;
 	int best_match = -1;
 	int match_level = 0;
 	int j = 0;
@@ -1046,8 +918,10 @@ static int try_dests_reg(struct file_struct *file, char *fname, int ndx,
 			match_level = 2;
 			/* FALL THROUGH */
 		case 2:
-			if (!unchanged_attrs(cmpbuf, file, sxp))
+			if (!unchanged_attrs(cmpbuf, file, sxp)) {
+				free_stat_x(sxp);
 				continue;
+			}
 			best_match = j;
 			match_level = 3;
 			break;
@@ -1056,47 +930,61 @@ static int try_dests_reg(struct file_struct *file, char *fname, int ndx,
 	} while (basis_dir[++j] != NULL);
 
 	if (!match_level)
-		return -1;
+		goto got_nothing_for_ya;
 
 	if (j != best_match) {
 		j = best_match;
 		pathjoin(cmpbuf, MAXPATHLEN, basis_dir[j], fname);
 		if (link_stat(cmpbuf, &sxp->st, 0) < 0)
-			return -1;
+			goto got_nothing_for_ya;
 	}
 
 	if (match_level == 3 && !copy_dest) {
+		if (find_exact_for_existing) {
+			if (link_dest && real_st.st_dev == sxp->st.st_dev && real_st.st_ino == sxp->st.st_ino)
+				return -1;
+			if (do_unlink(fname) < 0 && errno != ENOENT)
+				goto got_nothing_for_ya;
+		}
 #ifdef SUPPORT_HARD_LINKS
 		if (link_dest) {
 			if (!hard_link_one(file, fname, cmpbuf, 1))
 				goto try_a_copy;
 			if (preserve_hard_links && F_IS_HLINKED(file))
 				finish_hard_link(file, fname, ndx, &sxp->st, itemizing, code, j);
-			if (!maybe_ATTRS_REPORT && (verbose > 1 || stdout_format_has_i > 1)) {
+			if (!maybe_ATTRS_REPORT && (INFO_GTE(NAME, 2) || stdout_format_has_i > 1)) {
 				itemize(cmpbuf, file, ndx, 1, sxp,
 					ITEM_LOCAL_CHANGE | ITEM_XNAME_FOLLOWS,
 					0, "");
 			}
 		} else
 #endif
-		if (itemizing)
-			itemize(cmpbuf, file, ndx, 0, sxp, 0, 0, NULL);
-		if (verbose > 1 && maybe_ATTRS_REPORT)
+		{
+			if (itemizing)
+				itemize(cmpbuf, file, ndx, 0, sxp, 0, 0, NULL);
+		}
+		if (INFO_GTE(NAME, 2) && maybe_ATTRS_REPORT)
 			rprintf(FCLIENT, "%s is uptodate\n", fname);
 		return -2;
 	}
+
+	if (find_exact_for_existing)
+		goto got_nothing_for_ya;
 
 	if (match_level >= 2) {
 #ifdef SUPPORT_HARD_LINKS
 	  try_a_copy: /* Copy the file locally. */
 #endif
-		if (!dry_run && copy_altdest_file(cmpbuf, fname, file) < 0)
+		if (!dry_run && copy_altdest_file(cmpbuf, fname, file) < 0) {
+			if (find_exact_for_existing) /* Can get here via hard-link failure */
+				goto got_nothing_for_ya;
 			return -1;
+		}
 		if (itemizing)
 			itemize(cmpbuf, file, ndx, 0, sxp, ITEM_LOCAL_CHANGE, 0, NULL);
 		if (maybe_ATTRS_REPORT
-		 && ((!itemizing && verbose && match_level == 2)
-		  || (verbose > 1 && match_level == 3))) {
+		 && ((!itemizing && INFO_GTE(NAME, 1) && match_level == 2)
+		  || (INFO_GTE(NAME, 2) && match_level == 3))) {
 			code = match_level == 3 ? FCLIENT : FINFO;
 			rprintf(code, "%s%s\n", fname,
 				match_level == 3 ? " is uptodate" : "");
@@ -1109,6 +997,10 @@ static int try_dests_reg(struct file_struct *file, char *fname, int ndx,
 	}
 
 	return FNAMECMP_BASIS_DIR_LOW + j;
+
+got_nothing_for_ya:
+	sxp->st = real_st;
+	return -1;
 }
 
 /* This is only called for non-regular files.  We return -2 if we've finished
@@ -1118,12 +1010,15 @@ static int try_dests_non(struct file_struct *file, char *fname, int ndx,
 			 char *cmpbuf, stat_x *sxp, int itemizing,
 			 enum logcode code)
 {
-	char lnk[MAXPATHLEN];
 	int best_match = -1;
 	int match_level = 0;
 	enum nonregtype type;
 	uint32 *devp;
-	int len, j = 0;
+#ifdef SUPPORT_LINKS
+	char lnk[MAXPATHLEN];
+	int len;
+#endif
+	int j = 0;
 
 #ifndef SUPPORT_LINKS
 	if (S_ISLNK(file->mode))
@@ -1163,11 +1058,13 @@ static int try_dests_non(struct file_struct *file, char *fname, int ndx,
 			if (!IS_DEVICE(sxp->st.st_mode))
 				continue;
 			break;
-#ifdef SUPPORT_LINKS
 		case TYPE_SYMLINK:
+#ifdef SUPPORT_LINKS
 			if (!S_ISLNK(sxp->st.st_mode))
 				continue;
 			break;
+#else
+			return -1;
 #endif
 		}
 		if (match_level < 1) {
@@ -1183,14 +1080,16 @@ static int try_dests_non(struct file_struct *file, char *fname, int ndx,
 			if (sxp->st.st_rdev != MAKEDEV(DEV_MAJOR(devp), DEV_MINOR(devp)))
 				continue;
 			break;
-#ifdef SUPPORT_LINKS
 		case TYPE_SYMLINK:
+#ifdef SUPPORT_LINKS
 			if ((len = bpc_readlink(cmpbuf, lnk, MAXPATHLEN-1)) <= 0)
 				continue;
 			lnk[len] = '\0';
 			if (strcmp(lnk, F_SYMLINK(file)) != 0)
 				continue;
 			break;
+#else
+			return -1;
 #endif
 		}
 		if (match_level < 2) {
@@ -1236,13 +1135,13 @@ static int try_dests_non(struct file_struct *file, char *fname, int ndx,
 #endif
 			match_level = 2;
 		if (itemizing && stdout_format_has_i
-		 && (verbose > 1 || stdout_format_has_i > 1)) {
+		 && (INFO_GTE(NAME, 2) || stdout_format_has_i > 1)) {
 			int chg = compare_dest && type != TYPE_DIR ? 0
 			    : ITEM_LOCAL_CHANGE + (match_level == 3 ? ITEM_XNAME_FOLLOWS : 0);
 			char *lp = match_level == 3 ? "" : NULL;
 			itemize(cmpbuf, file, ndx, 0, sxp, chg + ITEM_MATCHED, 0, lp);
 		}
-		if (verbose > 1 && maybe_ATTRS_REPORT) {
+		if (INFO_GTE(NAME, 2) && maybe_ATTRS_REPORT) {
 			rprintf(FCLIENT, "%s%s is uptodate\n",
 				fname, type == TYPE_DIR ? "/" : "");
 		}
@@ -1255,7 +1154,8 @@ static int try_dests_non(struct file_struct *file, char *fname, int ndx,
 static void list_file_entry(struct file_struct *f)
 {
 	char permbuf[PERMSTRING_SIZE];
-	double len;
+	int64 len;
+	int colwidth = human_readable ? 14 : 11;
 
 	if (!F_IS_ACTIVE(f)) {
 		/* this can happen if duplicate names were removed */
@@ -1269,15 +1169,20 @@ static void list_file_entry(struct file_struct *f)
 
 #ifdef SUPPORT_LINKS
 	if (preserve_links && S_ISLNK(f->mode)) {
-		rprintf(FINFO, "%s %11.0f %s %s -> %s\n",
-			permbuf, len, timestring(f->modtime),
-			f_name(f, NULL), F_SYMLINK(f));
+		rprintf(FINFO, "%s %*s %s %s -> %s\n",
+			permbuf, colwidth, human_num(len),
+			timestring(f->modtime), f_name(f, NULL),
+			F_SYMLINK(f));
 	} else
 #endif
-	{
-		rprintf(FINFO, "%s %11.0f %s %s\n",
-			permbuf, len, timestring(f->modtime),
+	if (missing_args == 2 && f->mode == 0) {
+		rprintf(FINFO, "%-*s %s\n",
+			colwidth + 31, "*missing",
 			f_name(f, NULL));
+	} else {
+		rprintf(FINFO, "%s %*s %s %s\n",
+			permbuf, colwidth, human_num(len),
+			timestring(f->modtime), f_name(f, NULL));
 	}
 }
 
@@ -1307,12 +1212,13 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			   int itemizing, enum logcode code, int f_out)
 {
 	static const char *parent_dirname = "";
+	static struct file_struct *prior_dir_file = NULL;
 	/* Missing dir not created due to --dry-run; will still be scanned. */
 	static struct file_struct *dry_missing_dir = NULL;
 	/* Missing dir whose contents are skipped altogether due to
 	 * --ignore-non-existing, daemon exclude, or mkdir failure. */
 	static struct file_struct *skip_dir = NULL;
-	static struct file_list *fuzzy_dirlist = NULL;
+	static struct file_list *fuzzy_dirlist[MAX_BASIS_DIRS+1];
 	static int need_fuzzy_dirlist = 0;
 	struct file_struct *fuzzy_file = NULL;
 	int fd = -1, f_copy = -1;
@@ -1329,7 +1235,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		   : inc_recurse && ndx != cur_flist->ndx_start - 1 ? -1
 		   : 1;
 
-	if (verbose > 2)
+	if (DEBUG_GTE(GENR, 1))
 		rprintf(FINFO, "recv_generator(%s,%d)\n", fname, ndx);
 
 	if (list_only) {
@@ -1353,12 +1259,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		skip_dir = NULL;
 	}
 
-#ifdef SUPPORT_ACLS
-	sx.acc_acl = sx.def_acl = NULL;
-#endif
-#ifdef SUPPORT_XATTRS
-	sx.xattr = NULL;
-#endif
+	init_stat_x(&sx);
 	if (daemon_filter_list.head && (*fname != '.' || fname[1])) {
 		if (check_filter(&daemon_filter_list, FLOG, fname, is_dir) < 0) {
 			if (is_dir < 0)
@@ -1377,10 +1278,13 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 	}
 
 	if (dry_run > 1 || (dry_missing_dir && is_below(file, dry_missing_dir))) {
+		int i;
 	  parent_is_dry_missing:
-		if (fuzzy_dirlist) {
-			flist_free(fuzzy_dirlist);
-			fuzzy_dirlist = NULL;
+		for (i = 0; i < fuzzy_basis; i++) {
+			if (fuzzy_dirlist[i]) {
+				flist_free(fuzzy_dirlist[i]);
+				fuzzy_dirlist[i] = NULL;
+			}
 		}
 		parent_dirname = "";
 		statret = -1;
@@ -1389,23 +1293,39 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		const char *dn = file->dirname ? file->dirname : ".";
 		dry_missing_dir = NULL;
 		if (parent_dirname != dn && strcmp(parent_dirname, dn) != 0) {
+			/* Each parent dir must be in the file list or the flist data is bad.
+			 * Optimization: most of the time the parent dir will be the last dir
+			 * this function was asked to process in the file list. */
+			if (!inc_recurse
+			 && (*dn != '.' || dn[1]) /* Avoid an issue with --relative and the "." dir. */
+			 && (prior_dir_file && strcmp(dn, f_name(prior_dir_file, NULL)) != 0)
+			 && flist_find_name(cur_flist, dn, 1) < 0) {
+				rprintf(FERROR,
+					"ABORTING due to invalid path from sender: %s/%s\n",
+					dn, file->basename);
+				exit_cleanup(RERR_PROTOCOL);
+			}
 			if (relative_paths && !implied_dirs
 			 && do_stat(dn, &sx.st) < 0) {
 				if (dry_run)
 					goto parent_is_dry_missing;
-				if (create_directory_path(fname) < 0) {
+				if (make_path(fname, MKP_DROP_NAME | MKP_SKIP_SLASH) < 0) {
 					rsyserr(FERROR_XFER, errno,
 						"recv_generator: mkdir %s failed",
 						full_fname(dn));
 				}
 			}
-			if (fuzzy_dirlist) {
-				flist_free(fuzzy_dirlist);
-				fuzzy_dirlist = NULL;
-			}
-			if (fuzzy_basis)
+			if (fuzzy_basis) {
+				int i;
+				for (i = 0; i < fuzzy_basis; i++) {
+					if (fuzzy_dirlist[i]) {
+						flist_free(fuzzy_dirlist[i]);
+						fuzzy_dirlist[i] = NULL;
+					}
+				}
 				need_fuzzy_dirlist = 1;
-#if 0 /* was SUPPORT_ACLS */
+			}
+#ifdef SUPPORT_ACLS
 			if (!preserve_perms)
 				dflt_perms = default_perms_for_dir(dn);
 #endif
@@ -1413,8 +1333,17 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		parent_dirname = dn;
 
 		if (need_fuzzy_dirlist && S_ISREG(file->mode)) {
+			int i;
 			strlcpy(fnamecmpbuf, dn, sizeof fnamecmpbuf);
-			fuzzy_dirlist = get_dirlist(fnamecmpbuf, -1, GDL_IGNORE_FILTER_RULES);
+			for (i = 0; i < fuzzy_basis; i++) {
+				if (i && pathjoin(fnamecmpbuf, MAXPATHLEN, basis_dir[i-1], dn) >= MAXPATHLEN)
+					continue;
+				fuzzy_dirlist[i] = get_dirlist(fnamecmpbuf, -1, GDL_IGNORE_FILTER_RULES);
+				if (fuzzy_dirlist[i] && fuzzy_dirlist[i]->used == 0) {
+					flist_free(fuzzy_dirlist[i]);
+					fuzzy_dirlist[i] = NULL;
+				}
+			}
 			need_fuzzy_dirlist = 0;
 		}
 
@@ -1422,7 +1351,15 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		stat_errno = errno;
 	}
 
-        // fprintf(stderr, "recv_generator: fname %s: statret %d, isdir %d, protocol %d, always %d\n", fname, statret, is_dir, protocol_version, always_checksum);
+	if (missing_args == 2 && file->mode == 0) {
+		if (filter_list.head && check_filter(&filter_list, FINFO, fname, is_dir) < 0)
+			return;
+		if (statret == 0)
+			delete_item(fname, sx.st.st_mode, del_opts);
+		return;
+	}
+
+        /* fprintf(stderr, "recv_generator: fname %s: statret %d, isdir %d, protocol %d, always %d\n", fname, statret, is_dir, protocol_version, always_checksum); */
 
 	if ( statret != 0 && !is_dir && protocol_version >= 30 && always_checksum ) {
             /*
@@ -1451,7 +1388,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		else if (F_IS_HLINKED(file))
 			handle_skipped_hlink(file, itemizing, code, f_out);
 #endif
-		if (verbose > 1) {
+		if (INFO_GTE(SKIP, 1)) {
 			rprintf(FINFO, "not creating new %s \"%s\"\n",
 				is_dir ? "directory" : "file", fname);
 		}
@@ -1464,7 +1401,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 
 	if (ignore_existing > 0 && statret == 0
 	 && (!is_dir || !S_ISDIR(sx.st.st_mode))) {
-		if (verbose > 1 && is_dir >= 0)
+		if (INFO_GTE(SKIP, 1) && is_dir >= 0)
 			rprintf(FINFO, "%s exists\n", fname);
 #ifdef SUPPORT_HARD_LINKS
 		if (F_IS_HLINKED(file))
@@ -1487,6 +1424,8 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		} else
 			added_perms = 0;
 		if (is_dir < 0) {
+			if (!(preserve_times & PRESERVE_DIR_TIMES))
+				return;
 			/* In inc_recurse mode we want to make sure any missing
 			 * directories get created while we're still processing
 			 * the parent dir (which allows us to touch the parent
@@ -1515,8 +1454,9 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 				dry_missing_dir = file;
 			file->flags |= FLAG_MISSING_DIR;
 		}
+		init_stat_x(&real_sx);
+		real_sx.st = sx.st;
 		real_ret = statret;
-		real_sx = sx;
 		if (file->flags & FLAG_DIR_CREATED)
 			statret = -1;
 		if (!preserve_perms) { /* See comment in non-dir code below. */
@@ -1541,7 +1481,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		}
 		if (real_ret != 0 && do_mkdir(fname,file->mode|added_perms) < 0 && errno != EEXIST) {
 			if (!relative_paths || errno != ENOENT
-			 || create_directory_path(fname) < 0
+			 || make_path(fname, MKP_DROP_NAME | MKP_SKIP_SLASH) < 0
 			 || (do_mkdir(fname, file->mode|added_perms) < 0 && errno != EEXIST)) {
 				rsyserr(FERROR_XFER, errno,
 					"recv_generator: mkdir %s failed",
@@ -1560,7 +1500,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			copy_xattrs(fnamecmpbuf, fname);
 #endif
 		if (set_file_attrs(fname, file, real_ret ? NULL : &real_sx, NULL, 0)
-		    && verbose && code != FNONE && f_out != -1)
+		    && INFO_GTE(NAME, 1) && code != FNONE && f_out != -1)
 			rprintf(code, "%s/\n", fname);
 
 		/* We need to ensure that the dirs in the transfer have both
@@ -1595,6 +1535,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			else
 				change_local_filter_dir(fname, strlen(fname), F_DEPTH(file));
 		}
+		prior_dir_file = file;
 		goto cleanup;
 	}
 
@@ -1616,7 +1557,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 #ifdef SUPPORT_LINKS
 		const char *sl = F_SYMLINK(file);
 		if (safe_symlinks && unsafe_symlink(sl, fname)) {
-			if (verbose) {
+			if (INFO_GTE(NAME, 1)) {
 				if (solo_file) {
 					/* fname contains the destination path, but we
 					 * want to report the source path. */
@@ -1632,15 +1573,14 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			char lnk[MAXPATHLEN];
 			int len;
 
-			if (!S_ISLNK(sx.st.st_mode))
-				statret = -1;
-			else if ((len = bpc_readlink(fname, lnk, MAXPATHLEN-1)) > 0
-			      && strncmp(lnk, sl, len) == 0 && sl[len] == '\0') {
+			if (S_ISLNK(sx.st.st_mode)
+			 && (len = bpc_readlink(fname, lnk, MAXPATHLEN-1)) > 0
+			 && strncmp(lnk, sl, len) == 0 && sl[len] == '\0') {
 				/* The link is pointing to the right place. */
 				set_file_attrs(fname, file, &sx, NULL, maybe_ATTRS_REPORT);
 				if (itemizing)
 					itemize(fname, file, ndx, 0, &sx, 0, 0, NULL);
-#if defined SUPPORT_HARD_LINKS && defined CAN_HARDLINK_SYMLINK
+#ifdef SUPPORT_HARD_LINKS
 				if (preserve_hard_links && F_IS_HLINKED(file))
 					finish_hard_link(file, fname, ndx, &sx.st, itemizing, code, -1);
 #endif
@@ -1649,10 +1589,6 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 					goto return_with_success;
 				goto cleanup;
 			}
-			/* Not the right symlink (or not a symlink), so
-			 * delete it. */
-			if (delete_item(fname, sx.st.st_mode, del_opts | DEL_FOR_SYMLINK) != 0)
-				goto cleanup;
 		} else if (basis_dir[0] != NULL) {
 			int j = try_dests_non(file, fname, ndx, fnamecmpbuf, &sx,
 					      itemizing, code);
@@ -1666,25 +1602,20 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 					goto cleanup;
 				itemizing = 0;
 				code = FNONE;
-			} else if (j >= 0)
+			} else if (j >= 0) {
 				statret = 1;
+				fnamecmp = fnamecmpbuf;
+			}
 		}
-#ifdef SUPPORT_HARD_LINKS
-		if (preserve_hard_links && F_HLINK_NOT_LAST(file)) {
-			cur_flist->in_progress++;
-			goto cleanup;
-		}
-#endif
-		if (do_symlink(sl, fname) != 0) {
-			rsyserr(FERROR_XFER, errno, "symlink %s -> \"%s\" failed",
-				full_fname(fname), sl);
-		} else {
+		if (atomic_create(file, fname, sl, NULL, MAKEDEV(0, 0), &sx, statret == 0 ? DEL_FOR_SYMLINK : 0)) {
 			set_file_attrs(fname, file, NULL, NULL, 0);
 			if (itemizing) {
-				itemize(fname, file, ndx, statret, &sx,
+				if (statret == 0 && !S_ISLNK(sx.st.st_mode))
+					statret = -1;
+				itemize(fnamecmp, file, ndx, statret, &sx,
 					ITEM_LOCAL_CHANGE|ITEM_REPORT_CHANGE, 0, NULL);
 			}
-			if (code != FNONE && verbose)
+			if (code != FNONE && INFO_GTE(NAME, 1))
 				rprintf(code, "%s -> %s\n", fname, sl);
 #ifdef SUPPORT_HARD_LINKS
 			if (preserve_hard_links && F_IS_HLINKED(file))
@@ -1704,13 +1635,13 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 	if ((am_root && preserve_devices && IS_DEVICE(file->mode))
 	 || (preserve_specials && IS_SPECIAL(file->mode))) {
 		dev_t rdev;
+		int del_for_flag = 0;
 		if (IS_DEVICE(file->mode)) {
 			uint32 *devp = F_RDEV_P(file);
 			rdev = MAKEDEV(DEV_MAJOR(devp), DEV_MINOR(devp));
 		} else
 			rdev = 0;
 		if (statret == 0) {
-			int del_for_flag;
 			if (IS_DEVICE(file->mode)) {
 				if (!IS_DEVICE(sx.st.st_mode))
 					statret = -1;
@@ -1736,8 +1667,6 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 					goto return_with_success;
 				goto cleanup;
 			}
-			if (delete_item(fname, sx.st.st_mode, del_opts | del_for_flag) != 0)
-				goto cleanup;
 		} else if (basis_dir[0] != NULL) {
 			int j = try_dests_non(file, fname, ndx, fnamecmpbuf, &sx,
 					      itemizing, code);
@@ -1751,30 +1680,23 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 					goto cleanup;
 				itemizing = 0;
 				code = FNONE;
-			} else if (j >= 0)
+			} else if (j >= 0) {
 				statret = 1;
+				fnamecmp = fnamecmpbuf;
+			}
 		}
-#ifdef SUPPORT_HARD_LINKS
-		if (preserve_hard_links && F_HLINK_NOT_LAST(file)) {
-			cur_flist->in_progress++;
-			goto cleanup;
-		}
-#endif
-		if (verbose > 2) {
+		if (DEBUG_GTE(GENR, 1)) {
 			rprintf(FINFO, "mknod(%s, 0%o, [%ld,%ld])\n",
 				fname, (int)file->mode,
 				(long)major(rdev), (long)minor(rdev));
 		}
-		if (do_mknod(fname, file->mode, rdev) < 0) {
-			rsyserr(FERROR_XFER, errno, "mknod %s failed",
-				full_fname(fname));
-		} else {
+		if (atomic_create(file, fname, NULL, NULL, rdev, &sx, del_for_flag)) {
 			set_file_attrs(fname, file, NULL, NULL, 0);
 			if (itemizing) {
-				itemize(fname, file, ndx, statret, &sx,
+				itemize(fnamecmp, file, ndx, statret, &sx,
 					ITEM_LOCAL_CHANGE|ITEM_REPORT_CHANGE, 0, NULL);
 			}
-			if (code != FNONE && verbose)
+			if (code != FNONE && INFO_GTE(NAME, 1))
 				rprintf(code, "%s\n", fname);
 #ifdef SUPPORT_HARD_LINKS
 			if (preserve_hard_links && F_IS_HLINKED(file))
@@ -1795,16 +1717,16 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		goto cleanup;
 	}
 
-	if (max_size > 0 && F_LENGTH(file) > max_size) {
-		if (verbose > 1) {
+	if (max_size >= 0 && F_LENGTH(file) > max_size) {
+		if (INFO_GTE(SKIP, 1)) {
 			if (solo_file)
 				fname = f_name(file, NULL);
 			rprintf(FINFO, "%s is over max-size\n", fname);
 		}
 		goto cleanup;
 	}
-	if (min_size > 0 && F_LENGTH(file) < min_size) {
-		if (verbose > 1) {
+	if (min_size >= 0 && F_LENGTH(file) < min_size) {
+		if (INFO_GTE(SKIP, 1)) {
 			if (solo_file)
 				fname = f_name(file, NULL);
 			rprintf(FINFO, "%s is under min-size\n", fname);
@@ -1814,7 +1736,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 
 	if (update_only > 0 && statret == 0
 	    && cmp_time(sx.st.st_mtime, file->modtime) > 0) {
-		if (verbose > 1)
+		if (INFO_GTE(SKIP, 1))
 			rprintf(FINFO, "%s is newer\n", fname);
 #ifdef SUPPORT_HARD_LINKS
 		if (F_IS_HLINKED(file))
@@ -1833,9 +1755,9 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		stat_errno = ENOENT;
 	}
 
-	if (statret != 0 && basis_dir[0] != NULL) {
+	if (basis_dir[0] != NULL && (statret != 0 || !copy_dest)) {
 		int j = try_dests_reg(file, fname, ndx, fnamecmpbuf, &sx,
-				      itemizing, code);
+				      statret == 0, itemizing, code);
 		if (j == -2) {
 			if (remove_source_files == 1)
 				goto return_with_success;
@@ -1848,8 +1770,9 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		}
 	}
 
+	init_stat_x(&real_sx);
+	real_sx.st = sx.st; /* Don't copy xattr/acl pointers, as they would free wrong. */
 	real_ret = statret;
-	real_sx = sx;
 
 	if (partial_dir && (partialptr = partial_dir_fname(fname)) != NULL
 	    && link_stat(partialptr, &partial_st, 0) == 0
@@ -1859,19 +1782,18 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 	} else
 		partialptr = NULL;
 
-	if (statret != 0 && fuzzy_dirlist) {
-		int j = find_fuzzy(file, fuzzy_dirlist);
-		if (j >= 0) {
-			fuzzy_file = fuzzy_dirlist->files[j];
+	if (statret != 0 && fuzzy_basis) {
+		/* Sets fnamecmp_type to FNAMECMP_FUZZY or above. */
+		fuzzy_file = find_fuzzy(file, fuzzy_dirlist, &fnamecmp_type);
+		if (fuzzy_file) {
 			f_name(fuzzy_file, fnamecmpbuf);
-			if (verbose > 2) {
+			if (DEBUG_GTE(FUZZY, 1)) {
 				rprintf(FINFO, "fuzzy basis selected for %s: %s\n",
 					fname, fnamecmpbuf);
 			}
 			sx.st.st_size = F_LENGTH(fuzzy_file);
 			statret = 0;
 			fnamecmp = fnamecmpbuf;
-			fnamecmp_type = FNAMECMP_FUZZY;
 		}
 	}
 
@@ -1941,7 +1863,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 				goto cleanup;
 			if (!(back_file = make_file(fname, NULL, NULL, 0, NO_FILTERS)))
 				goto pretend_missing;
-			if (copy_file(fname, backupptr, -1, back_file->mode, 1) < 0) {
+			if (copy_file(fname, backupptr, -1, back_file->mode) < 0) {
 				unmake_file(back_file);
 				back_file = NULL;
 				goto cleanup;
@@ -1950,10 +1872,10 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		goto notify_others;
 	}
 
-	if (fuzzy_dirlist) {
-		int j = flist_find(fuzzy_dirlist, file);
+	if (fuzzy_dirlist[0]) {
+		int j = flist_find(fuzzy_dirlist[0], file);
 		if (j >= 0) /* don't use changing file as future fuzzy basis */
-			fuzzy_dirlist->files[j]->flags |= FLAG_FILE_SENT;
+			fuzzy_dirlist[0]->files[j]->flags |= FLAG_FILE_SENT;
 	}
 
 	/* open the file */
@@ -1990,36 +1912,27 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			goto cleanup;
 		}
 		if ((f_copy = do_open(backupptr, O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, 0600)) < 0) {
-			int save_errno = errno ? errno : EINVAL; /* 0 paranoia */
-			if (errno == ENOENT && make_bak_dir(backupptr) == 0) {
-				if ((f_copy = do_open(backupptr, O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, 0600)) < 0)
-					save_errno = errno ? errno : save_errno;
-				else
-					save_errno = 0;
-			}
-			if (save_errno) {
-				rsyserr(FERROR_XFER, save_errno, "open %s", full_fname(backupptr));
-				unmake_file(back_file);
-				back_file = NULL;
-				bpc_close(fd);
-				goto cleanup;
-			}
+			rsyserr(FERROR_XFER, errno, "open %s", full_fname(backupptr));
+			unmake_file(back_file);
+			back_file = NULL;
+			close(fd);
+			goto cleanup;
 		}
 		fnamecmp_type = FNAMECMP_BACKUP;
 	}
 
-	if (verbose > 3) {
-		rprintf(FINFO, "gen mapped %s of size %.0f\n",
-			fnamecmp, (double)sx.st.st_size);
+	if (DEBUG_GTE(DELTASUM, 3)) {
+		rprintf(FINFO, "gen mapped %s of size %s\n",
+			fnamecmp, big_num(sx.st.st_size));
 	}
 
-	if (verbose > 2)
+	if (DEBUG_GTE(DELTASUM, 2))
 		rprintf(FINFO, "generating and sending sums for %d\n", ndx);
 
   notify_others:
 	if (remove_source_files && !delay_updates && !phase && !dry_run)
 		increment_active_files(ndx, itemizing, code);
-	if (inc_recurse && !dry_run)
+	if (inc_recurse && (!dry_run || write_batch < 0))
 		cur_flist->in_progress++;
 #ifdef SUPPORT_HARD_LINKS
 	if (preserve_hard_links && F_IS_HLINKED(file))
@@ -2032,18 +1945,11 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			iflags |= ITEM_REPORT_CHANGE;
 		if (fnamecmp_type != FNAMECMP_FNAME)
 			iflags |= ITEM_BASIS_TYPE_FOLLOWS;
-		if (fnamecmp_type == FNAMECMP_FUZZY)
+		if (fnamecmp_type >= FNAMECMP_FUZZY)
 			iflags |= ITEM_XNAME_FOLLOWS;
 		itemize(fnamecmp, file, -1, real_ret, &real_sx, iflags, fnamecmp_type,
 			fuzzy_file ? fuzzy_file->basename : NULL);
-#ifdef SUPPORT_ACLS
-		if (preserve_acls)
-			free_acl(&real_sx);
-#endif
-#ifdef SUPPORT_XATTRS
-		if (preserve_xattrs)
-			free_xattr(&real_sx);
-#endif
+		free_stat_x(&real_sx);
 	}
 
 	if (!do_xfers) {
@@ -2084,22 +1990,84 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 #endif
 		set_file_attrs(backupptr, back_file, NULL, NULL, 0);
 		preserve_xattrs = save_preserve_xattrs;
-		if (verbose > 1) {
+		if (INFO_GTE(BACKUP, 1)) {
 			rprintf(FINFO, "backed up %s to %s\n",
 				fname, backupptr);
 		}
 		unmake_file(back_file);
 	}
 
-#ifdef SUPPORT_ACLS
-	if (preserve_acls)
-		free_acl(&sx);
+	free_stat_x(&sx);
+}
+
+/* If we are replacing an existing hard link, symlink, device, or special file,
+ * create a temp-name item and rename it into place.  A symlimk specifies slnk,
+ * a hard link specifies hlnk, otherwise we create a device based on rdev.
+ * Specify 0 for the del_for_flag if there is not a file to replace.  This
+ * returns 1 on success and 0 on failure. */
+int atomic_create(struct file_struct *file, char *fname, const char *slnk, const char *hlnk,
+		  dev_t rdev, stat_x *sxp, int del_for_flag)
+{
+	char tmpname[MAXPATHLEN];
+	const char *create_name;
+	int skip_atomic, dir_in_the_way = del_for_flag && S_ISDIR(sxp->st.st_mode);
+
+        /*
+         * For BackupPC, creating the special file as a temporary and renaming it 
+         * (the so-called atomic method) is problematic for several reasons.  So
+         * we force it to do it the old way by forcing skip_atomic to 1.
+         */
+        skip_atomic = 1;
+
+	if (del_for_flag) {
+		if (make_backups > 0 && !dir_in_the_way) {
+			if (!make_backup(fname, skip_atomic))
+				return 0;
+		} else if (skip_atomic) {
+			int del_opts = delete_mode || force_delete ? DEL_RECURSE : 0;
+			if (delete_item(fname, sxp->st.st_mode, del_opts | del_for_flag) != 0)
+				return 0;
+		}
+	}
+
+	create_name = skip_atomic ? fname : tmpname;
+
+	if (slnk) {
+#ifdef SUPPORT_LINKS
+		if (do_symlink(slnk, create_name) < 0) {
+			rsyserr(FERROR_XFER, errno, "symlink %s -> \"%s\" failed",
+				full_fname(create_name), slnk);
+			return 0;
+		}
+#else
+		return 0;
 #endif
-#ifdef SUPPORT_XATTRS
-	if (preserve_xattrs)
-		free_xattr(&sx);
+	} else if (hlnk) {
+#ifdef SUPPORT_HARD_LINKS
+		if (!hard_link_one(file, create_name, hlnk, 0))
+			return 0;
+#else
+		return 0;
 #endif
-	return;
+	} else {
+		if (do_mknod(create_name, file->mode, rdev) < 0) {
+			rsyserr(FERROR_XFER, errno, "mknod %s failed",
+				full_fname(create_name));
+			return 0;
+		}
+	}
+
+	if (!skip_atomic) {
+                bpc_tmpNameFlagSet(tmpname);
+		if (do_rename(tmpname, fname) < 0) {
+			rsyserr(FERROR_XFER, errno, "rename %s -> \"%s\" failed",
+				full_fname(tmpname), full_fname(fname));
+			do_unlink(tmpname);
+			return 0;
+		}
+	}
+
+	return 1;
 }
 
 #ifdef SUPPORT_HARD_LINKS
@@ -2142,18 +2110,19 @@ static void touch_up_dirs(struct file_list *flist, int ndx)
 	 * transfer and/or re-set any tweaked modified-time values. */
 	for (i = start; i <= end; i++, counter++) {
 		file = flist->files[i];
+		if (!F_IS_ACTIVE(file))
+			continue;
 		if (!S_ISDIR(file->mode)
 		 || (!implied_dirs && file->flags & FLAG_IMPLIED_DIR))
 			continue;
-		if (verbose > 3) {
+		if (DEBUG_GTE(TIME, 2)) {
 			fname = f_name(file, NULL);
 			rprintf(FINFO, "touch_up_dirs: %s (%d)\n",
 				NS(fname), i);
 		}
 		/* Be sure not to retouch permissions with --fake-super. */
 		fix_dir_perms = !am_root && !(file->mode & S_IWUSR);
-		if (!F_IS_ACTIVE(file) || file->flags & FLAG_MISSING_DIR
-		 || !(need_retouch_dir_times || fix_dir_perms))
+		if (file->flags & FLAG_MISSING_DIR || !(need_retouch_dir_times || fix_dir_perms))
 			continue;
 		fname = f_name(file, NULL);
 		if (fix_dir_perms)
@@ -2162,11 +2131,11 @@ static void touch_up_dirs(struct file_list *flist, int ndx)
 			STRUCT_STAT st;
 			if (link_stat(fname, &st, 0) == 0
 			 && cmp_time(st.st_mtime, file->modtime) != 0)
-				set_modtime(fname, file->modtime, file->mode);
+				set_modtime(fname, file->modtime, F_MOD_NSEC(file), file->mode);
 		}
 		if (counter >= loopchk_limit) {
 			if (allowed_lull)
-				maybe_send_keepalive();
+				maybe_send_keepalive(time(NULL), MSK_ALLOW_FLUSH);
 			else
 				maybe_flush_socket(0);
 			counter = 0;
@@ -2200,9 +2169,11 @@ void check_for_finished_files(int itemizing, enum logcode code, int check_redo)
 #endif
 
 		if (check_redo && (ndx = get_redo_num()) != -1) {
+			OFF_T save_max_size = max_size;
+			OFF_T save_min_size = min_size;
 			csum_length = SUM_LENGTH;
-			max_size = -max_size;
-			min_size = -min_size;
+			max_size = -1;
+			min_size = -1;
 			ignore_existing = -ignore_existing;
 			ignore_non_existing = -ignore_non_existing;
 			update_only = -update_only;
@@ -2226,8 +2197,8 @@ void check_for_finished_files(int itemizing, enum logcode code, int check_redo)
 			cur_flist = flist;
 
 			csum_length = SHORT_SUM_LENGTH;
-			max_size = -max_size;
-			min_size = -min_size;
+			max_size = save_max_size;
+			min_size = save_min_size;
 			ignore_existing = -ignore_existing;
 			ignore_non_existing = -ignore_non_existing;
 			update_only = -update_only;
@@ -2247,8 +2218,12 @@ void check_for_finished_files(int itemizing, enum logcode code, int check_redo)
 			break;
 
 		write_ndx(sock_f_out, NDX_DONE);
-		if (!read_batch)
-			maybe_flush_socket(1);
+		if (!read_batch && !flist_eof) {
+			int old_total = 0;
+			for (flist = first_flist; flist != cur_flist; flist = flist->next)
+				old_total += flist->used;
+			maybe_flush_socket(!flist_eof && file_total - old_total < MIN_FILECNT_LOOKAHEAD/2);
+		}
 
 		if (delete_during == 2 || !dir_tweaking) {
 			/* Skip directory touch-up. */
@@ -2265,7 +2240,8 @@ void generate_files(int f_out, const char *local_name)
 	char fbuf[MAXPATHLEN];
 	int itemizing;
 	enum logcode code;
-	int save_do_progress = do_progress;
+	int save_info_flist = info_levels[INFO_FLIST];
+	int save_info_progress = info_levels[INFO_PROGRESS];
 
 	if (protocol_version >= 29) {
 		itemizing = 1;
@@ -2292,8 +2268,8 @@ void generate_files(int f_out, const char *local_name)
 	    | (protocol_version >= 30 || !am_server ? ITEM_REPORT_TIMEFAIL : 0);
 	implied_dirs_are_missing = relative_paths && !implied_dirs && protocol_version < 30;
 
-	if (verbose > 2)
-		rprintf(FINFO, "generator starting pid=%ld\n", (long)getpid());
+	if (DEBUG_GTE(GENR, 1))
+		rprintf(FINFO, "generator starting pid=%d\n", (int)getpid());
 
 	if (delete_before && !solo_file && cur_flist->used > 0)
 		do_delete_pass();
@@ -2303,29 +2279,23 @@ void generate_files(int f_out, const char *local_name)
 		if (!deldelay_buf)
 			out_of_memory("delete-delay");
 	}
-	do_progress = 0;
+	info_levels[INFO_FLIST] = info_levels[INFO_PROGRESS] = 0;
 
 	if (append_mode > 0 || whole_file < 0)
 		whole_file = 0;
-	if (verbose >= 2) {
+	if (DEBUG_GTE(FLIST, 1)) {
 		rprintf(FINFO, "delta-transmission %s\n",
 			whole_file
 			? "disabled for local transfer or --whole-file"
 			: "enabled");
 	}
 
-	/* Since we often fill up the outgoing socket and then just sit around
-	 * waiting for the other 2 processes to do their thing, we don't want
-	 * to exit on a timeout.  If the data stops flowing, the receiver will
-	 * notice that and let us know via the message pipe (or its closing). */
-	ignore_timeout = 1;
-
 	dflt_perms = (ACCESSPERMS & ~orig_umask);
 
 	do {
 #ifdef SUPPORT_HARD_LINKS
 		if (preserve_hard_links && inc_recurse) {
-			while (!flist_eof && file_total < FILECNT_LOOKAHEAD/2)
+			while (!flist_eof && file_total < MIN_FILECNT_LOOKAHEAD/2)
 				wait_for_receiver();
 		}
 #endif
@@ -2373,7 +2343,7 @@ void generate_files(int f_out, const char *local_name)
 
 			if (i + cur_flist->ndx_start >= next_loopchk) {
 				if (allowed_lull)
-					maybe_send_keepalive();
+					maybe_send_keepalive(time(NULL), MSK_ALLOW_FLUSH);
 				else
 					maybe_flush_socket(0);
 				next_loopchk += loopchk_limit;
@@ -2396,7 +2366,7 @@ void generate_files(int f_out, const char *local_name)
 	if (delete_during)
 		delete_in_dir(NULL, NULL, &dev_zero);
 	phase++;
-	if (verbose > 2)
+	if (DEBUG_GTE(GENR, 1))
 		rprintf(FINFO, "generate_files phase=%d\n", phase);
 
 	while (1) {
@@ -2407,14 +2377,21 @@ void generate_files(int f_out, const char *local_name)
 	}
 
 	phase++;
-	if (verbose > 2)
+	if (DEBUG_GTE(GENR, 1))
 		rprintf(FINFO, "generate_files phase=%d\n", phase);
 
 	write_ndx(f_out, NDX_DONE);
 
 	/* Reduce round-trip lag-time for a useless delay-updates phase. */
-	if (protocol_version >= 29 && !delay_updates)
+	if (protocol_version >= 29 && EARLY_DELAY_DONE_MSG())
 		write_ndx(f_out, NDX_DONE);
+
+	if (protocol_version >= 31 && EARLY_DELETE_DONE_MSG()) {
+		if ((INFO_GTE(STATS, 2) && (delete_mode || force_delete)) || read_batch)
+			write_del_stats(f_out);
+		if (EARLY_DELAY_DONE_MSG()) /* Can't send this before delay */
+			write_ndx(f_out, NDX_DONE);
+	}
 
 	/* Read MSG_DONE for the redo phase (and any prior messages). */
 	while (1) {
@@ -2426,32 +2403,49 @@ void generate_files(int f_out, const char *local_name)
 
 	if (protocol_version >= 29) {
 		phase++;
-		if (verbose > 2)
+		if (DEBUG_GTE(GENR, 1))
 			rprintf(FINFO, "generate_files phase=%d\n", phase);
-		if (delay_updates)
+		if (!EARLY_DELAY_DONE_MSG()) {
 			write_ndx(f_out, NDX_DONE);
+			if (protocol_version >= 31 && EARLY_DELETE_DONE_MSG())
+				write_ndx(f_out, NDX_DONE);
+		}
 		/* Read MSG_DONE for delay-updates phase & prior messages. */
 		while (msgdone_cnt == 2)
 			wait_for_receiver();
 	}
 
-	do_progress = save_do_progress;
+	info_levels[INFO_FLIST] = save_info_flist;
+	info_levels[INFO_PROGRESS] = save_info_progress;
+
 	if (delete_during == 2)
 		do_delayed_deletions(fbuf);
 	if (delete_after && !solo_file && file_total > 0)
 		do_delete_pass();
 
+	if (max_delete >= 0 && skipped_deletes) {
+		rprintf(FWARNING,
+			"Deletions stopped due to --max-delete limit (%d skipped)\n",
+			skipped_deletes);
+		io_error |= IOERR_DEL_LIMIT;
+	}
+
+	if (protocol_version >= 31) {
+		if (!EARLY_DELETE_DONE_MSG()) {
+			if (INFO_GTE(STATS, 2) || read_batch)
+				write_del_stats(f_out);
+			write_ndx(f_out, NDX_DONE);
+		}
+
+		/* Read MSG_DONE for late-delete phase & prior messages. */
+		while (msgdone_cnt == 3)
+			wait_for_receiver();
+	}
+
 	if ((need_retouch_dir_perms || need_retouch_dir_times)
 	 && dir_tweaking && (!inc_recurse || delete_during == 2))
 		touch_up_dirs(dir_flist, -1);
 
-	if (max_delete >= 0 && deletion_count > max_delete) {
-		rprintf(FWARNING,
-			"Deletions stopped due to --max-delete limit (%d skipped)\n",
-			deletion_count - max_delete);
-		io_error |= IOERR_DEL_LIMIT;
-	}
-
-	if (verbose > 2)
+	if (DEBUG_GTE(GENR, 1))
 		rprintf(FINFO, "generate_files finished\n");
 }

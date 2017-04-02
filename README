@@ -127,10 +127,6 @@ source code repository then you can use git:
 
     git clone git://git.samba.org/rsync.git
 
-If you want to get the very latest version of rsync-bpc from github:
-
-    git clone https://github.com/backuppc/rsync-bpc
-
 See the download page for full details on all the ways to grab the
 source, including nightly tar files, web-browsing of the git repository,
 etc.:
@@ -158,4 +154,3 @@ AVAILABILITY
 The main web site for rsync is http://rsync.samba.org/
 The main ftp site is ftp://rsync.samba.org/pub/rsync/
 This is also available as rsync://rsync.samba.org/rsyncftp/
-The github site for rsync-bpc is https://github.com/backuppc/rsync-bpc

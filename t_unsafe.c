@@ -2,7 +2,7 @@
  * Test harness for unsafe_symlink().  Not linked into rsync itself.
  *
  * Copyright (C) 2002 Martin Pool
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,11 +25,13 @@
 
 int dry_run = 0;
 int am_root = 0;
+int am_sender = 1;
 int read_only = 0;
 int list_only = 0;
-int verbose = 0;
+int human_readable = 0;
 int preserve_perms = 0;
 int preserve_executability = 0;
+short info_levels[COUNT_INFO], debug_levels[COUNT_DEBUG];
 
 int
 main(int argc, char **argv)

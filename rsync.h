@@ -2,7 +2,7 @@
  * Copyright (C) 1996, 2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2008 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -61,6 +61,7 @@
 #define XMIT_GROUP_NAME_FOLLOWS (1<<11) /* protocols 30 - now */
 #define XMIT_HLINK_FIRST (1<<12)	/* protocols 30 - now (HLINKED files only) */
 #define XMIT_IO_ERROR_ENDLIST (1<<12)	/* protocols 31*- now (w/XMIT_EXTENDED_FLAGS) (also protocol 30 w/'f' compat flag) */
+#define XMIT_MOD_NSEC (1<<13)		/* protocols 31 - now */
 
 /* These flags are used in the live flist data. */
 
@@ -81,6 +82,7 @@
 #define FLAG_LENGTH64 (1<<9)	/* sender/receiver/generator */
 #define FLAG_SKIP_GROUP (1<<10)	/* receiver/generator */
 #define FLAG_TIME_FAILED (1<<11)/* generator */
+#define FLAG_MOD_NSEC (1<<12)	/* sender/receiver/generator */
 
 /* These flags are passed to functions but not stored. */
 
@@ -96,7 +98,7 @@
 			     == ((unsigned)(b2) & (unsigned)(mask)))
 
 /* update this if you make incompatible changes */
-#define PROTOCOL_VERSION 30
+#define PROTOCOL_VERSION 31
 
 /* This is used when working on a new protocol version in CVS, and should
  * be a new non-zero value for each CVS change that affects the protocol.
@@ -124,7 +126,8 @@
 #define OLD_PROTOCOL_VERSION 25
 #define MAX_PROTOCOL_VERSION 40
 
-#define FILECNT_LOOKAHEAD 1000
+#define MIN_FILECNT_LOOKAHEAD 1000
+#define MAX_FILECNT_LOOKAHEAD 10000
 
 #define RSYNC_PORT 873
 
@@ -132,11 +135,13 @@
 #define WRITE_SIZE (32*1024)
 #define CHUNK_SIZE (32*1024)
 #define MAX_MAP_SIZE (256*1024)
-#define IO_BUFFER_SIZE (4092)
+#define IO_BUFFER_SIZE (32*1024)
 #define MAX_BLOCK_SIZE ((int32)1 << 17)
 
 /* For compatibility with older rsyncs */
 #define OLD_MAX_BLOCK_SIZE ((int32)1 << 29)
+
+#define ROUND_UP_1024(siz) ((siz) & (1024-1) ? ((siz) | (1024-1)) + 1 : (siz))
 
 #define IOERR_GENERAL	(1<<0) /* For backward compatibility, this must == 1 */
 #define IOERR_VANISHED	(1<<1)
@@ -203,6 +208,7 @@
 #define CFN_KEEP_TRAILING_SLASH (1<<1)
 #define CFN_DROP_TRAILING_DOT_DIR (1<<2)
 #define CFN_COLLAPSE_DOT_DOT_DIRS (1<<3)
+#define CFN_REFUSE_DOT_DOT_DIRS (1<<4)
 
 #define SP_DEFAULT 0
 #define SP_KEEP_DOT_DIRS (1<<0)
@@ -231,20 +237,46 @@ enum msgcode {
 	MSG_ERROR_UTF8=FERROR_UTF8, /* sibling logging */
 	MSG_LOG=FLOG, MSG_CLIENT=FCLIENT, /* sibling logging */
 	MSG_REDO=9,	/* reprocess indicated flist index */
-	MSG_FLIST=20,	/* extra file list over sibling socket */
-	MSG_FLIST_EOF=21,/* we've transmitted all the file lists */
+	MSG_STATS=10,	/* message has stats data for generator */
 	MSG_IO_ERROR=22,/* the sending side had an I/O error */
-	MSG_NOOP=42,	/* a do-nothing message */
+	MSG_IO_TIMEOUT=33,/* tell client about a daemon's timeout value */
+	MSG_NOOP=42,	/* a do-nothing message (legacy protocol-30 only) */
+	MSG_ERROR_EXIT=86, /* synchronize an error exit (siblings and protocol >= 31) */
 	MSG_SUCCESS=100,/* successfully updated indicated flist index */
 	MSG_DELETED=101,/* successfully deleted a file on receiving side */
 	MSG_NO_SEND=102,/* sender failed to open a file we wanted */
-	MSG_DONE=86,	/* current phase is done */
-	MSG_RENAME=88	/* rename request sent from the recevier to generator */
+        MSG_RENAME=104  /* rename request sent from the recevier to generator */
 };
 
 #define NDX_DONE -1
 #define NDX_FLIST_EOF -2
+#define NDX_DEL_STATS -3
 #define NDX_FLIST_OFFSET -101
+
+/* For calling delete_item() and delete_dir_contents(). */
+#define DEL_NO_UID_WRITE 	(1<<0) /* file/dir has our uid w/o write perm */
+#define DEL_RECURSE		(1<<1) /* if dir, delete all contents */
+#define DEL_DIR_IS_EMPTY	(1<<2) /* internal delete_FUNCTIONS use only */
+#define DEL_FOR_FILE		(1<<3) /* making room for a replacement file */
+#define DEL_FOR_DIR		(1<<4) /* making room for a replacement dir */
+#define DEL_FOR_SYMLINK 	(1<<5) /* making room for a replacement symlink */
+#define DEL_FOR_DEVICE		(1<<6) /* making room for a replacement device */
+#define DEL_FOR_SPECIAL 	(1<<7) /* making room for a replacement special */
+#define DEL_FOR_BACKUP	 	(1<<8) /* the delete is for a backup operation */
+
+#define DEL_MAKE_ROOM (DEL_FOR_FILE|DEL_FOR_DIR|DEL_FOR_SYMLINK|DEL_FOR_DEVICE|DEL_FOR_SPECIAL)
+
+enum delret {
+	DR_SUCCESS = 0, DR_FAILURE, DR_AT_LIMIT, DR_NOT_EMPTY
+};
+
+/* Defines for make_path() */
+#define MKP_DROP_NAME		(1<<0) /* drop trailing filename or trailing slash */
+#define MKP_SKIP_SLASH		(1<<1) /* skip one or more leading slashes */
+
+/* Defines for maybe_send_keepalive() */
+#define MSK_ALLOW_FLUSH 	(1<<0)
+#define MSK_ACTIVE_RECEIVER 	(1<<1)
 
 #include "errcode.h"
 
@@ -261,6 +293,7 @@ enum msgcode {
 #undef NO_DEVICE_XATTRS
 #undef NO_SPECIAL_XATTRS
 #undef NO_SYMLINK_XATTRS
+#undef SUPPORT_ACLS
 
 #define SUPPORT_HARD_LINKS 1
 #define SUPPORT_LINKS 1
@@ -367,7 +400,7 @@ enum msgcode {
 #include <utime.h>
 #endif
 
-#if defined HAVE_LUTIMES || defined HAVE_UTIMENSAT
+#if defined HAVE_UTIMENSAT || defined HAVE_LUTIMES
 #define CAN_SET_SYMLINK_TIMES 1
 #endif
 
@@ -377,6 +410,14 @@ enum msgcode {
 
 #if defined HAVE_LCHMOD || defined HAVE_SETATTRLIST
 #define CAN_CHMOD_SYMLINK 1
+#endif
+
+#ifdef HAVE_UTIMENSAT
+#ifdef HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC
+#define ST_MTIME_NSEC st_mtim.tv_nsec
+#elif defined(HAVE_STRUCT_STAT_ST_MTIMENSEC)
+#define ST_MTIME_NSEC st_mtimensec
+#endif
 #endif
 
 #ifdef HAVE_SYS_SELECT_H
@@ -600,7 +641,7 @@ struct hashtable {
 	void *nodes;
 	int32 size, entries;
 	uint32 node_size;
-	int key64;
+	short key64;
 };
 
 struct ht_int32_node {
@@ -661,6 +702,23 @@ struct ht_int64_node {
 #define ACLS_NEED_MASK 1
 #endif
 
+#if 0
+#ifdef HAVE_LINUX_FALLOC_H
+#include <linux/falloc.h>
+#endif
+#ifdef FALLOC_FL_KEEP_SIZE
+#define SUPPORT_PREALLOCATION 1
+#elif defined HAVE_FTRUNCATE
+#define SUPPORT_PREALLOCATION 1
+#define PREALLOCATE_NEEDS_TRUNCATE 1
+#endif
+#else /* !fallocate */
+#if defined HAVE_EFFICIENT_POSIX_FALLOCATE && defined HAVE_FTRUNCATE
+#define SUPPORT_PREALLOCATION 1
+#define PREALLOCATE_NEEDS_TRUNCATE 1
+#endif
+#endif
+
 union file_extras {
 	int32 num;
 	uint32 unum;
@@ -692,7 +750,9 @@ extern int xattrs_ndx;
 #define REQ_EXTRA(f,ndx) ((union file_extras*)(f) - (ndx))
 #define OPT_EXTRA(f,bump) ((union file_extras*)(f) - file_extra_cnt - 1 - (bump))
 
+#define NSEC_BUMP(f) ((f)->flags & FLAG_MOD_NSEC ? 1 : 0)
 #define LEN64_BUMP(f) ((f)->flags & FLAG_LENGTH64 ? 1 : 0)
+#define START_BUMP(f) (NSEC_BUMP(f) + LEN64_BUMP(f))
 #define HLINK_BUMP(f) ((f)->flags & (FLAG_HLINKED|FLAG_HLINK_DONE) ? inc_recurse+1 : 0)
 #define ACL_BUMP(f) (acls_ndx ? 1 : 0)
 
@@ -701,8 +761,10 @@ extern int xattrs_ndx;
 #define F_LENGTH(f) ((int64)(f)->len32)
 #else
 #define F_LENGTH(f) ((int64)(f)->len32 + ((f)->flags & FLAG_LENGTH64 \
-		   ? (int64)OPT_EXTRA(f, 0)->unum << 32 : 0))
+		   ? (int64)OPT_EXTRA(f, NSEC_BUMP(f))->unum << 32 : 0))
 #endif
+
+#define F_MOD_NSEC(f) ((f)->flags & FLAG_MOD_NSEC ? OPT_EXTRA(f, 0)->unum : 0)
 
 /* If there is a symlink string, it is always right after the basename */
 #define F_SYMLINK(f) ((f)->basename + strlen((f)->basename) + 1)
@@ -721,22 +783,21 @@ extern int xattrs_ndx;
 #define F_NDX(f) REQ_EXTRA(f, unsort_ndx)->num
 
 /* These items are per-entry optional: */
-#define F_HL_GNUM(f) OPT_EXTRA(f, LEN64_BUMP(f))->num /* non-dirs */
-#define F_HL_PREV(f) OPT_EXTRA(f, LEN64_BUMP(f)+inc_recurse)->num /* non-dirs */
-#define F_DIR_NODE_P(f) (&OPT_EXTRA(f, LEN64_BUMP(f) \
+#define F_HL_GNUM(f) OPT_EXTRA(f, START_BUMP(f))->num /* non-dirs */
+#define F_HL_PREV(f) OPT_EXTRA(f, START_BUMP(f)+inc_recurse)->num /* non-dirs */
+#define F_DIR_NODE_P(f) (&OPT_EXTRA(f, START_BUMP(f) \
 				+ DIRNODE_EXTRA_CNT - 1)->num) /* sender dirs */
-#define F_DIR_RELNAMES_P(f) (&OPT_EXTRA(f, LEN64_BUMP(f) + DIRNODE_EXTRA_CNT \
+#define F_DIR_RELNAMES_P(f) (&OPT_EXTRA(f, START_BUMP(f) + DIRNODE_EXTRA_CNT \
 				+ PTR_EXTRA_CNT - 1)->num) /* sender dirs */
-#define F_DIR_DEFACL(f) OPT_EXTRA(f, LEN64_BUMP(f))->unum /* receiver dirs */
-#define F_DIR_DEV_P(f) (&OPT_EXTRA(f, LEN64_BUMP(f) + ACL_BUMP(f) \
+#define F_DIR_DEFACL(f) OPT_EXTRA(f, START_BUMP(f))->unum /* receiver dirs */
+#define F_DIR_DEV_P(f) (&OPT_EXTRA(f, START_BUMP(f) + ACL_BUMP(f) \
 				+ DEV_EXTRA_CNT - 1)->unum) /* receiver dirs */
 
-/* This optional item might follow an F_HL_*() item.
- * (Note: a device doesn't need to check LEN64_BUMP(f).) */
-#define F_RDEV_P(f) (&OPT_EXTRA(f, HLINK_BUMP(f) + DEV_EXTRA_CNT - 1)->unum)
+/* This optional item might follow an F_HL_*() item. */
+#define F_RDEV_P(f) (&OPT_EXTRA(f, START_BUMP(f) + HLINK_BUMP(f) + DEV_EXTRA_CNT - 1)->unum)
 
 /* The sum is only present on regular files. */
-#define F_SUM(f) ((char*)OPT_EXTRA(f, LEN64_BUMP(f) + HLINK_BUMP(f) \
+#define F_SUM(f) ((char*)OPT_EXTRA(f, START_BUMP(f) + HLINK_BUMP(f) \
 				    + SUM_EXTRA_CNT - 1))
 
 /* Some utility defines: */
@@ -754,6 +815,8 @@ extern int xattrs_ndx;
 #define DIR_PARENT(a) (a)[0]
 #define DIR_FIRST_CHILD(a) (a)[1]
 #define DIR_NEXT_SIBLING(a) (a)[2]
+
+#define IS_MISSING_FILE(statbuf) ((statbuf).st_mode == 0)
 
 /*
  * Start the flist array at FLIST_START entries and grow it
@@ -821,47 +884,44 @@ struct map_struct {
 	int status;		/* first errno from read errors		*/
 };
 
-#define MATCHFLG_WILD		(1<<0) /* pattern has '*', '[', and/or '?' */
-#define MATCHFLG_WILD2		(1<<1) /* pattern has '**' */
-#define MATCHFLG_WILD2_PREFIX	(1<<2) /* pattern starts with "**" */
-#define MATCHFLG_WILD3_SUFFIX	(1<<3) /* pattern ends with "***" */
-#define MATCHFLG_ABS_PATH	(1<<4) /* path-match on absolute path */
-#define MATCHFLG_INCLUDE	(1<<5) /* this is an include, not an exclude */
-#define MATCHFLG_DIRECTORY	(1<<6) /* this matches only directories */
-#define MATCHFLG_WORD_SPLIT	(1<<7) /* split rules on whitespace */
-#define MATCHFLG_NO_INHERIT	(1<<8) /* don't inherit these rules */
-#define MATCHFLG_NO_PREFIXES	(1<<9) /* parse no prefixes from patterns */
-#define MATCHFLG_MERGE_FILE	(1<<10)/* specifies a file to merge */
-#define MATCHFLG_PERDIR_MERGE	(1<<11)/* merge-file is searched per-dir */
-#define MATCHFLG_EXCLUDE_SELF	(1<<12)/* merge-file name should be excluded */
-#define MATCHFLG_FINISH_SETUP	(1<<13)/* per-dir merge file needs setup */
-#define MATCHFLG_NEGATE 	(1<<14)/* rule matches when pattern does not */
-#define MATCHFLG_CVS_IGNORE	(1<<15)/* rule was -C or :C */
-#define MATCHFLG_SENDER_SIDE	(1<<16)/* rule applies to the sending side */
-#define MATCHFLG_RECEIVER_SIDE	(1<<17)/* rule applies to the receiving side */
-#define MATCHFLG_CLEAR_LIST 	(1<<18)/* this item is the "!" token */
-#define MATCHFLG_PERISHABLE	(1<<19)/* perishable if parent dir goes away */
+#define FILTRULE_WILD		(1<<0) /* pattern has '*', '[', and/or '?' */
+#define FILTRULE_WILD2		(1<<1) /* pattern has '**' */
+#define FILTRULE_WILD2_PREFIX	(1<<2) /* pattern starts with "**" */
+#define FILTRULE_WILD3_SUFFIX	(1<<3) /* pattern ends with "***" */
+#define FILTRULE_ABS_PATH	(1<<4) /* path-match on absolute path */
+#define FILTRULE_INCLUDE	(1<<5) /* this is an include, not an exclude */
+#define FILTRULE_DIRECTORY	(1<<6) /* this matches only directories */
+#define FILTRULE_WORD_SPLIT	(1<<7) /* split rules on whitespace */
+#define FILTRULE_NO_INHERIT	(1<<8) /* don't inherit these rules */
+#define FILTRULE_NO_PREFIXES	(1<<9) /* parse no prefixes from patterns */
+#define FILTRULE_MERGE_FILE	(1<<10)/* specifies a file to merge */
+#define FILTRULE_PERDIR_MERGE	(1<<11)/* merge-file is searched per-dir */
+#define FILTRULE_EXCLUDE_SELF	(1<<12)/* merge-file name should be excluded */
+#define FILTRULE_FINISH_SETUP	(1<<13)/* per-dir merge file needs setup */
+#define FILTRULE_NEGATE 	(1<<14)/* rule matches when pattern does not */
+#define FILTRULE_CVS_IGNORE	(1<<15)/* rule was -C or :C */
+#define FILTRULE_SENDER_SIDE	(1<<16)/* rule applies to the sending side */
+#define FILTRULE_RECEIVER_SIDE	(1<<17)/* rule applies to the receiving side */
+#define FILTRULE_CLEAR_LIST	(1<<18)/* this item is the "!" token */
+#define FILTRULE_PERISHABLE	(1<<19)/* perishable if parent dir goes away */
 
-#define MATCHFLGS_FROM_CONTAINER (MATCHFLG_ABS_PATH | MATCHFLG_INCLUDE \
-				| MATCHFLG_DIRECTORY | MATCHFLG_SENDER_SIDE \
-				| MATCHFLG_NEGATE | MATCHFLG_RECEIVER_SIDE \
-				| MATCHFLG_PERISHABLE)
+#define FILTRULES_SIDES (FILTRULE_SENDER_SIDE | FILTRULE_RECEIVER_SIDE)
 
-struct filter_struct {
+typedef struct filter_struct {
 	struct filter_struct *next;
 	char *pattern;
-	uint32 match_flags;
+	uint32 rflags;
 	union {
 		int slash_cnt;
 		struct filter_list_struct *mergelist;
 	} u;
-};
+} filter_rule;
 
-struct filter_list_struct {
-	struct filter_struct *head;
-	struct filter_struct *tail;
+typedef struct filter_list_struct {
+	filter_rule *head;
+	filter_rule *tail;
 	char *debug_type;
-};
+} filter_rule_list;
 
 struct stats {
 	int64 total_size;
@@ -873,8 +933,10 @@ struct stats {
 	int64 flist_buildtime;
 	int64 flist_xfertime;
 	int64 flist_size;
-	int num_files;
-	int num_transferred_files;
+	int num_files, num_dirs, num_symlinks, num_devices, num_specials;
+	int created_files, created_dirs, created_symlinks, created_devices, created_specials;
+	int deleted_files, deleted_dirs, deleted_symlinks, deleted_devices, deleted_specials;
+	int xferred_files;
 };
 
 struct chmod_mode_struct;
@@ -909,13 +971,22 @@ typedef struct {
 } xbuf;
 
 #define INIT_XBUF(xb, str, ln, sz) (xb).buf = (str), (xb).len = (ln), (xb).size = (sz), (xb).pos = 0
-#define INIT_XBUF_STRLEN(xb, str) (xb).buf = (str), (xb).len = strlen((xb).buf), (xb).size = (-1), (xb).pos = 0
+#define INIT_XBUF_STRLEN(xb, str) (xb).buf = (str), (xb).len = strlen((xb).buf), (xb).size = (size_t)-1, (xb).pos = 0
 /* This one is used to make an output xbuf based on a char[] buffer: */
 #define INIT_CONST_XBUF(xb, bf) (xb).buf = (bf), (xb).size = sizeof (bf), (xb).len = (xb).pos = 0
 
 #define ICB_EXPAND_OUT (1<<0)
 #define ICB_INCLUDE_BAD (1<<1)
 #define ICB_INCLUDE_INCOMPLETE (1<<2)
+#define ICB_CIRCULAR_OUT (1<<3)
+#define ICB_INIT (1<<4)
+
+#define IOBUF_KEEP_BUFS 0
+#define IOBUF_FREE_BUFS 1
+
+#define MPLX_SWITCHING IOBUF_KEEP_BUFS
+#define MPLX_ALL_DONE IOBUF_FREE_BUFS
+#define MPLX_TO_BUFFERED 2
 
 #define RL_EOL_NULLS (1<<0)
 #define RL_DUMP_COMMENTS (1<<1)
@@ -1003,6 +1074,9 @@ extern int errno;
 
 #ifdef HAVE_READLINK
 #define SUPPORT_LINKS 1
+#if !defined NO_SYMLINK_XATTRS && !defined NO_SYMLINK_USER_XATTRS
+#define do_readlink(path, buf, bufsiz) readlink(path, buf, bufsiz)
+#endif
 #endif
 #ifdef HAVE_LINK
 #define SUPPORT_HARD_LINKS 1
@@ -1182,7 +1256,53 @@ size_t strlcat(char *d, const char *s, size_t bufsize);
 #define FD_ZERO(fdsetp) memset(fdsetp, 0, sizeof (fd_set))
 #endif
 
-extern int verbose;
+extern short info_levels[], debug_levels[];
+
+#define INFO_GTE(flag, lvl) (info_levels[INFO_##flag] >= (lvl))
+#define INFO_EQ(flag, lvl) (info_levels[INFO_##flag] == (lvl))
+#define DEBUG_GTE(flag, lvl) (debug_levels[DEBUG_##flag] >= (lvl))
+#define DEBUG_EQ(flag, lvl) (debug_levels[DEBUG_##flag] == (lvl))
+
+#define INFO_BACKUP 0
+#define INFO_COPY (INFO_BACKUP+1)
+#define INFO_DEL (INFO_COPY+1)
+#define INFO_FLIST (INFO_DEL+1)
+#define INFO_MISC (INFO_FLIST+1)
+#define INFO_MOUNT (INFO_MISC+1)
+#define INFO_NAME (INFO_MOUNT+1)
+#define INFO_PROGRESS (INFO_NAME+1)
+#define INFO_REMOVE (INFO_PROGRESS+1)
+#define INFO_SKIP (INFO_REMOVE+1)
+#define INFO_STATS (INFO_SKIP+1)
+#define INFO_SYMSAFE (INFO_STATS+1)
+
+#define COUNT_INFO (INFO_SYMSAFE+1)
+
+#define DEBUG_ACL 0
+#define DEBUG_BACKUP (DEBUG_ACL+1)
+#define DEBUG_BIND (DEBUG_BACKUP+1)
+#define DEBUG_CHDIR (DEBUG_BIND+1)
+#define DEBUG_CONNECT (DEBUG_CHDIR+1)
+#define DEBUG_CMD (DEBUG_CONNECT+1)
+#define DEBUG_DEL (DEBUG_CMD+1)
+#define DEBUG_DELTASUM (DEBUG_DEL+1)
+#define DEBUG_DUP (DEBUG_DELTASUM+1)
+#define DEBUG_EXIT (DEBUG_DUP+1)
+#define DEBUG_FILTER (DEBUG_EXIT+1)
+#define DEBUG_FLIST (DEBUG_FILTER+1)
+#define DEBUG_FUZZY (DEBUG_FLIST+1)
+#define DEBUG_GENR (DEBUG_FUZZY+1)
+#define DEBUG_HASH (DEBUG_GENR+1)
+#define DEBUG_HLINK (DEBUG_HASH+1)
+#define DEBUG_ICONV (DEBUG_HLINK+1)
+#define DEBUG_IO (DEBUG_ICONV+1)
+#define DEBUG_OWN (DEBUG_IO+1)
+#define DEBUG_PROTO (DEBUG_OWN+1)
+#define DEBUG_RECV (DEBUG_PROTO+1)
+#define DEBUG_SEND (DEBUG_RECV+1)
+#define DEBUG_TIME (DEBUG_SEND+1)
+
+#define COUNT_DEBUG (DEBUG_TIME+1)
 
 #ifndef HAVE_INET_NTOP
 const char *inet_ntop(int af, const void *src, char *dst, size_t size);
@@ -1190,6 +1310,10 @@ const char *inet_ntop(int af, const void *src, char *dst, size_t size);
 
 #ifndef HAVE_INET_PTON
 int inet_pton(int af, const char *src, void *dst);
+#endif
+
+#ifndef HAVE_GETPASS
+char *getpass(const char *prompt);
 #endif
 
 #ifdef MAINTAINER_MODE

@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1998-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2001-2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2002-2009 Wayne Davison
+ * Copyright (C) 2002-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,10 +20,9 @@
  */
 
 #include "rsync.h"
-#include "ifuncs.h"
+#include "itypes.h"
 
 extern int quiet;
-extern int verbose;
 extern int dry_run;
 extern int output_motd;
 extern int list_only;
@@ -37,6 +36,7 @@ extern int ignore_errors;
 extern int preserve_xattrs;
 extern int kluge_around_eof;
 extern int daemon_over_rsh;
+extern int munge_symlinks;
 extern int sanitize_paths;
 extern int numeric_ids;
 extern int filesfrom_fd;
@@ -48,14 +48,13 @@ extern int write_batch;
 extern int default_af_hint;
 extern int logfile_format_has_i;
 extern int logfile_format_has_o_or_i;
-extern mode_t orig_umask;
 extern char *bind_address;
 extern char *config_file;
 extern char *logfile_format;
 extern char *files_from;
 extern char *tmpdir;
 extern struct chmod_mode_struct *chmod_modes;
-extern struct filter_list_struct daemon_filter_list;
+extern filter_rule_list daemon_filter_list;
 #ifdef ICONV_OPTION
 extern char *iconv_opt;
 extern iconv_t ic_send, ic_recv;
@@ -64,7 +63,6 @@ extern iconv_t ic_send, ic_recv;
 char *auth_user;
 int read_only = 0;
 int module_id = -1;
-int munge_symlinks = 0;
 struct chmod_mode_struct *daemon_chmod_modes;
 
 /* module_dirlen is the length of the module_dir string when in daemon
@@ -80,6 +78,11 @@ static int rl_nulls = 0;
 #ifdef HAVE_SIGACTION
 static struct sigaction sigact;
 #endif
+
+static item_list gid_list = EMPTY_ITEM_LIST;
+
+/* Used when "reverse lookup" is off. */
+const char undetermined_hostname[] = "UNDETERMINED";
 
 /**
  * Run a client connected to an rsyncd.  The alternative to this
@@ -158,7 +161,7 @@ static int exchange_protocols(int f_in, int f_out, char *buf, size_t bufsiz, int
 	}
 
 	/* This strips the \n. */
-	if (!read_line_old(f_in, buf, bufsiz)) {
+	if (!read_line_old(f_in, buf, bufsiz, 0)) {
 		if (am_client)
 			rprintf(FERROR, "rsync: did not see server greeting\n");
 		return -1;
@@ -270,7 +273,7 @@ int start_inband_exchange(int f_in, int f_out, const char *user, int argc, char 
 
 	sargs[sargc] = NULL;
 
-	if (verbose > 1)
+	if (DEBUG_GTE(CMD, 1))
 		print_child_argv("sending daemon args:", sargs);
 
 	io_printf(f_out, "%.*s\n", modlen, modname);
@@ -280,7 +283,7 @@ int start_inband_exchange(int f_in, int f_out, const char *user, int argc, char 
 	kluge_around_eof = list_only && protocol_version < 25 ? 1 : 0;
 
 	while (1) {
-		if (!read_line_old(f_in, line, sizeof line)) {
+		if (!read_line_old(f_in, line, sizeof line, 0)) {
 			rprintf(FERROR, "rsync: didn't get server startup line\n");
 			return -1;
 		}
@@ -334,7 +337,7 @@ int start_inband_exchange(int f_in, int f_out, const char *user, int argc, char 
 
 	if (protocol_version < 23) {
 		if (protocol_version == 22 || !am_sender)
-			io_start_multiplex_in();
+			io_start_multiplex_in(f_in);
 	}
 
 	free(modname);
@@ -342,61 +345,83 @@ int start_inband_exchange(int f_in, int f_out, const char *user, int argc, char 
 	return 0;
 }
 
-static char *finish_pre_exec(pid_t pid, int fd, char *request,
+static char *finish_pre_exec(pid_t pid, int write_fd, int read_fd, char *request,
 			     char **early_argv, char **argv)
 {
-	int j = 0, status = -1;
+	char buf[BIGPATHBUFLEN], *bp;
+	int j = 0, status = -1, msglen = sizeof buf - 1;
 
 	if (!request)
 		request = "(NONE)";
 
-	write_buf(fd, request, strlen(request)+1);
+	write_buf(write_fd, request, strlen(request)+1);
 	if (early_argv) {
 		for ( ; *early_argv; early_argv++)
-			write_buf(fd, *early_argv, strlen(*early_argv)+1);
+			write_buf(write_fd, *early_argv, strlen(*early_argv)+1);
 		j = 1; /* Skip arg0 name in argv. */
 	}
-	for ( ; argv[j]; j++) {
-		write_buf(fd, argv[j], strlen(argv[j])+1);
-		if (argv[j][0] == '.' && argv[j][1] == '\0')
-			break;
-	}
-	write_byte(fd, 0);
+	for ( ; argv[j]; j++)
+		write_buf(write_fd, argv[j], strlen(argv[j])+1);
+	write_byte(write_fd, 0);
 
-	close(fd);
+	close(write_fd);
+
+	/* Read the stdout from the pre-xfer exec program.  This it is only
+	 * displayed to the user if the script also returns an error status. */
+	for (bp = buf; msglen > 0; msglen -= j) {
+		if ((j = read(read_fd, bp, msglen)) <= 0) {
+			if (j == 0)
+				break;
+			if (errno == EINTR)
+				continue;
+			break; /* Just ignore the read error for now... */
+		}
+		bp += j;
+		if (j > 1 && bp[-1] == '\n' && bp[-2] == '\r') {
+			bp--;
+			j--;
+			bp[-1] = '\n';
+		}
+	}
+	*bp = '\0';
+
+	close(read_fd);
 
 	if (wait_process(pid, &status, 0) < 0
 	 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
 		char *e;
-		if (asprintf(&e, "pre-xfer exec returned failure (%d)%s%s\n",
+		if (asprintf(&e, "pre-xfer exec returned failure (%d)%s%s%s\n%s",
 			     status, status < 0 ? ": " : "",
-			     status < 0 ? strerror(errno) : "") < 0)
-			out_of_memory("finish_pre_exec");
+			     status < 0 ? strerror(errno) : "",
+			     *buf ? ":" : "", buf) < 0)
+			return "out_of_memory in finish_pre_exec\n";
 		return e;
 	}
 	return NULL;
 }
 
+#ifdef HAVE_PUTENV
 static int read_arg_from_pipe(int fd, char *buf, int limit)
 {
 	char *bp = buf, *eob = buf + limit - 1;
 
 	while (1) {
-	    int got = read(fd, bp, 1);
-	    if (got != 1) {
-		if (got < 0 && errno == EINTR)
-			continue;
-		return -1;
-	    }
-	    if (*bp == '\0')
-		break;
-	    if (bp < eob)
-		bp++;
+		int got = read(fd, bp, 1);
+		if (got != 1) {
+			if (got < 0 && errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (*bp == '\0')
+			break;
+		if (bp < eob)
+			bp++;
 	}
 	*bp = '\0';
 
 	return bp - buf;
 }
+#endif
 
 static int path_failure(int f_out, const char *dir, BOOL was_chdir)
 {
@@ -408,19 +433,86 @@ static int path_failure(int f_out, const char *dir, BOOL was_chdir)
 	return -1;
 }
 
-static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
+static int add_a_group(int f_out, const char *gname)
+{
+	gid_t gid, *gid_p;
+	if (!group_to_gid(gname, &gid, True)) {
+		rprintf(FLOG, "Invalid gid %s\n", gname);
+		io_printf(f_out, "@ERROR: invalid gid %s\n", gname);
+		return -1;
+	}
+	gid_p = EXPAND_ITEM_LIST(&gid_list, gid_t, -32);
+	*gid_p = gid;
+	return 0;
+}
+
+#ifdef HAVE_GETGROUPLIST
+static int want_all_groups(int f_out, uid_t uid)
+{
+	const char *err;
+	if ((err = getallgroups(uid, &gid_list)) != NULL) {
+		rsyserr(FLOG, errno, "%s", err);
+		io_printf(f_out, "@ERROR: %s\n", err);
+		return -1;
+	}
+	return 0;
+}
+#elif defined HAVE_INITGROUPS
+static struct passwd *want_all_groups(int f_out, uid_t uid)
+{
+	struct passwd *pw;
+	gid_t *gid_p;
+	if ((pw = getpwuid(uid)) == NULL) {
+		rsyserr(FLOG, errno, "getpwuid failed");
+		io_printf(f_out, "@ERROR: getpwuid failed\n");
+		return NULL;
+	}
+	/* Start with the default group and initgroups() will add the rest. */
+	gid_p = EXPAND_ITEM_LIST(&gid_list, gid_t, -32);
+	*gid_p = pw->pw_gid;
+	return pw;
+}
+#endif
+
+static void set_env_str(const char *var, const char *str)
+{
+#ifdef HAVE_PUTENV
+	char *mem;
+	if (asprintf(&mem, "%s=%s", var, str) < 0)
+		out_of_memory("set_env_str");
+	putenv(mem);
+#endif
+}
+
+#ifdef HAVE_PUTENV
+static void set_env_num(const char *var, long num)
+{
+	char *mem;
+	if (asprintf(&mem, "%s=%ld", var, num) < 0)
+		out_of_memory("set_env_num");
+	putenv(mem);
+}
+#endif
+
+static int rsync_module(int f_in, int f_out, int i, const char *addr, const char *host)
 {
 	int argc;
 	char **argv, **orig_argv, **orig_early_argv, *module_chdir;
 	char line[BIGPATHBUFLEN];
-	uid_t uid = (uid_t)-2;  /* canonically "nobody" */
-	gid_t gid = (gid_t)-2;
+#if defined HAVE_INITGROUPS && !defined HAVE_GETGROUPLIST
+	struct passwd *pw = NULL;
+#endif
+	uid_t uid;
+	int set_uid;
 	char *p, *err_msg = NULL;
 	char *name = lp_name(i);
 	int use_chroot = lp_use_chroot(i);
-	int ret, pre_exec_fd = -1;
+	int ret, pre_exec_arg_fd = -1, pre_exec_error_fd = -1;
+	int save_munge_symlinks;
 	pid_t pre_exec_pid = 0;
 	char *request = NULL;
+
+	set_env_str("RSYNC_MODULE_NAME", name);
 
 #ifdef ICONV_OPTION
 	iconv_opt = lp_charset(i);
@@ -429,7 +521,14 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 	iconv_opt = NULL;
 #endif
 
-	if (!allow_access(addr, host, lp_hosts_allow(i), lp_hosts_deny(i))) {
+	/* If reverse lookup is disabled globally but enabled for this module,
+	 * we need to do it now before the access check. */
+	if (host == undetermined_hostname && lp_reverse_lookup(i))
+		host = client_name(f_in);
+	set_env_str("RSYNC_HOST_NAME", host);
+	set_env_str("RSYNC_HOST_ADDR", addr);
+
+	if (!allow_access(addr, &host, i)) {
 		rprintf(FLOG, "rsync denied on module %s from %s (%s)\n",
 			name, host, addr);
 		if (!lp_list(i))
@@ -461,17 +560,16 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 		return -1;
 	}
 
+	read_only = lp_read_only(i); /* may also be overridden by auth_server() */
 	auth_user = auth_server(f_in, f_out, i, host, addr, "@RSYNCD: AUTHREQD ");
 
 	if (!auth_user) {
 		io_printf(f_out, "@ERROR: auth failed on module %s\n", name);
 		return -1;
 	}
+	set_env_str("RSYNC_USER_NAME", auth_user);
 
 	module_id = i;
-
-	if (lp_read_only(i))
-		read_only = 1;
 
 	if (lp_transfer_logging(i) && !logfile_format)
 		logfile_format = lp_log_format(i);
@@ -480,36 +578,52 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 	if (logfile_format_has_i || log_format_has(logfile_format, 'o'))
 		logfile_format_has_o_or_i = 1;
 
-	am_root = (MY_UID() == 0);
+	uid = MY_UID();
+	am_root = (uid == 0);
 
-	if (am_root) {
-		p = lp_uid(i);
-		if (!name_to_uid(p, &uid)) {
-			if (!isDigit(p)) {
-				rprintf(FLOG, "Invalid uid %s\n", p);
-				io_printf(f_out, "@ERROR: invalid uid %s\n", p);
+	p = *lp_uid(i) ? lp_uid(i) : am_root ? NOBODY_USER : NULL;
+	if (p) {
+		if (!user_to_uid(p, &uid, True)) {
+			rprintf(FLOG, "Invalid uid %s\n", p);
+			io_printf(f_out, "@ERROR: invalid uid %s\n", p);
+			return -1;
+		}
+		set_uid = 1;
+	} else
+		set_uid = 0;
+
+	p = *lp_gid(i) ? strtok(lp_gid(i), ", ") : NULL;
+	if (p) {
+		/* The "*" gid must be the first item in the list. */
+		if (strcmp(p, "*") == 0) {
+#ifdef HAVE_GETGROUPLIST
+			if (want_all_groups(f_out, uid) < 0)
+				return -1;
+#elif defined HAVE_INITGROUPS
+			if ((pw = want_all_groups(f_out, uid)) == NULL)
+				return -1;
+#else
+			rprintf(FLOG, "This rsync does not support a gid of \"*\"\n");
+			io_printf(f_out, "@ERROR: invalid gid setting.\n");
+			return -1;
+#endif
+		} else if (add_a_group(f_out, p) < 0)
+			return -1;
+		while ((p = strtok(NULL, ", ")) != NULL) {
+#if defined HAVE_INITGROUPS && !defined HAVE_GETGROUPLIST
+			if (pw) {
+				rprintf(FLOG, "This rsync cannot add groups after \"*\".\n");
+				io_printf(f_out, "@ERROR: invalid gid setting.\n");
 				return -1;
 			}
-			uid = atoi(p);
-		}
-
-		p = lp_gid(i);
-		if (!name_to_gid(p, &gid)) {
-			if (!isDigit(p)) {
-				rprintf(FLOG, "Invalid gid %s\n", p);
-				io_printf(f_out, "@ERROR: invalid gid %s\n", p);
+#endif
+			if (add_a_group(f_out, p) < 0)
 				return -1;
-			}
-			gid = atoi(p);
 		}
+	} else if (am_root) {
+		if (add_a_group(f_out, NOBODY_GROUP) < 0)
+			return -1;
 	}
-
-	/* TODO: If we're not root, but the configuration requests
-	 * that we change to some uid other than the current one, then
-	 * log a warning. */
-
-	/* TODO: Perhaps take a list of gids, and make them into the
-	 * supplementary groups. */
 
 	module_dir = lp_path(i);
 	if (*module_dir == '\0') {
@@ -540,6 +654,7 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 			return path_failure(f_out, module_dir, False);
 		full_module_path = module_dir = module_chdir;
 	}
+	set_env_str("RSYNC_MODULE_PATH", full_module_path);
 
 	if (module_dirlen == 1) {
 		module_dirlen = 0;
@@ -548,45 +663,32 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 		set_filter_dir(module_dir, module_dirlen);
 
 	p = lp_filter(i);
-	parse_rule(&daemon_filter_list, p, MATCHFLG_WORD_SPLIT,
+	parse_filter_str(&daemon_filter_list, p, rule_template(FILTRULE_WORD_SPLIT),
 		   XFLG_ABS_IF_SLASH | XFLG_DIR2WILD3);
 
 	p = lp_include_from(i);
-	parse_filter_file(&daemon_filter_list, p, MATCHFLG_INCLUDE,
+	parse_filter_file(&daemon_filter_list, p, rule_template(FILTRULE_INCLUDE),
 	    XFLG_ABS_IF_SLASH | XFLG_DIR2WILD3 | XFLG_OLD_PREFIXES | XFLG_FATAL_ERRORS);
 
 	p = lp_include(i);
-	parse_rule(&daemon_filter_list, p,
-		   MATCHFLG_INCLUDE | MATCHFLG_WORD_SPLIT,
+	parse_filter_str(&daemon_filter_list, p,
+		   rule_template(FILTRULE_INCLUDE | FILTRULE_WORD_SPLIT),
 		   XFLG_ABS_IF_SLASH | XFLG_DIR2WILD3 | XFLG_OLD_PREFIXES);
 
 	p = lp_exclude_from(i);
-	parse_filter_file(&daemon_filter_list, p, 0,
+	parse_filter_file(&daemon_filter_list, p, rule_template(0),
 	    XFLG_ABS_IF_SLASH | XFLG_DIR2WILD3 | XFLG_OLD_PREFIXES | XFLG_FATAL_ERRORS);
 
 	p = lp_exclude(i);
-	parse_rule(&daemon_filter_list, p, MATCHFLG_WORD_SPLIT,
+	parse_filter_str(&daemon_filter_list, p, rule_template(FILTRULE_WORD_SPLIT),
 		   XFLG_ABS_IF_SLASH | XFLG_DIR2WILD3 | XFLG_OLD_PREFIXES);
 
 	log_init(1);
 
 #ifdef HAVE_PUTENV
 	if (*lp_prexfer_exec(i) || *lp_postxfer_exec(i)) {
-		char *modname, *modpath, *hostaddr, *hostname, *username;
 		int status;
 
-		if (asprintf(&modname, "RSYNC_MODULE_NAME=%s", name) < 0
-		 || asprintf(&modpath, "RSYNC_MODULE_PATH=%s", full_module_path) < 0
-		 || asprintf(&hostaddr, "RSYNC_HOST_ADDR=%s", addr) < 0
-		 || asprintf(&hostname, "RSYNC_HOST_NAME=%s", host) < 0
-		 || asprintf(&username, "RSYNC_USER_NAME=%s", auth_user) < 0)
-			out_of_memory("rsync_module");
-		putenv(modname);
-		putenv(modpath);
-		putenv(hostaddr);
-		putenv(hostname);
-		putenv(username);
-		umask(orig_umask);
 		/* For post-xfer exec, fork a new process to run the rsync
 		 * daemon while this process waits for the exit status and
 		 * runs the indicated command at that point. */
@@ -598,18 +700,18 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 				return -1;
 			}
 			if (pid) {
-				if (asprintf(&p, "RSYNC_PID=%ld", (long)pid) > 0)
-					putenv(p);
+				close(f_in);
+				if (f_out != f_in)
+					close(f_out);
+				set_env_num("RSYNC_PID", (long)pid);
 				if (wait_process(pid, &status, 0) < 0)
 					status = -1;
-				if (asprintf(&p, "RSYNC_RAW_STATUS=%d", status) > 0)
-					putenv(p);
+				set_env_num("RSYNC_RAW_STATUS", status);
 				if (WIFEXITED(status))
 					status = WEXITSTATUS(status);
 				else
 					status = -1;
-				if (asprintf(&p, "RSYNC_EXIT_STATUS=%d", status) > 0)
-					putenv(p);
+				set_env_num("RSYNC_EXIT_STATUS", status);
 				if (system(lp_postxfer_exec(i)) < 0)
 					status = -1;
 				_exit(status);
@@ -619,10 +721,9 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 		 * command, though it first waits for the parent process to
 		 * send us the user's request via a pipe. */
 		if (*lp_prexfer_exec(i)) {
-			int fds[2];
-			if (asprintf(&p, "RSYNC_PID=%ld", (long)getpid()) > 0)
-				putenv(p);
-			if (pipe(fds) < 0 || (pre_exec_pid = fork()) < 0) {
+			int arg_fds[2], error_fds[2];
+			set_env_num("RSYNC_PID", (long)getpid());
+			if (pipe(arg_fds) < 0 || pipe(error_fds) < 0 || (pre_exec_pid = fork()) < 0) {
 				rsyserr(FLOG, errno, "pre-xfer exec preparation failed");
 				io_printf(f_out, "@ERROR: pre-xfer exec preparation failed\n");
 				return -1;
@@ -630,37 +731,43 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 			if (pre_exec_pid == 0) {
 				char buf[BIGPATHBUFLEN];
 				int j, len;
-				close(fds[1]);
-				set_blocking(fds[0]);
-				len = read_arg_from_pipe(fds[0], buf, BIGPATHBUFLEN);
+				close(arg_fds[1]);
+				close(error_fds[0]);
+				pre_exec_arg_fd = arg_fds[0];
+				pre_exec_error_fd = error_fds[1];
+				set_blocking(pre_exec_arg_fd);
+				set_blocking(pre_exec_error_fd);
+				len = read_arg_from_pipe(pre_exec_arg_fd, buf, BIGPATHBUFLEN);
 				if (len <= 0)
 					_exit(1);
-				if (asprintf(&p, "RSYNC_REQUEST=%s", buf) > 0)
-					putenv(p);
+				set_env_str("RSYNC_REQUEST", buf);
 				for (j = 0; ; j++) {
-					len = read_arg_from_pipe(fds[0], buf,
+					len = read_arg_from_pipe(pre_exec_arg_fd, buf,
 								 BIGPATHBUFLEN);
 					if (len <= 0) {
 						if (!len)
 							break;
 						_exit(1);
 					}
-					if (asprintf(&p, "RSYNC_ARG%d=%s", j, buf) > 0)
+					if (asprintf(&p, "RSYNC_ARG%d=%s", j, buf) >= 0)
 						putenv(p);
 				}
-				close(fds[0]);
+				close(pre_exec_arg_fd);
 				close(STDIN_FILENO);
-				close(STDOUT_FILENO);
+				dup2(pre_exec_error_fd, STDOUT_FILENO);
+				close(pre_exec_error_fd);
 				status = system(lp_prexfer_exec(i));
 				if (!WIFEXITED(status))
 					_exit(1);
 				_exit(WEXITSTATUS(status));
 			}
-			close(fds[0]);
-			set_blocking(fds[1]);
-			pre_exec_fd = fds[1];
+			close(arg_fds[0]);
+			close(error_fds[1]);
+			pre_exec_arg_fd = arg_fds[1];
+			pre_exec_error_fd = error_fds[0];
+			set_blocking(pre_exec_arg_fd);
+			set_blocking(pre_exec_error_fd);
 		}
-		umask(0);
 	}
 #endif
 
@@ -694,46 +801,48 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 		munge_symlinks = !use_chroot || module_dirlen;
 	if (munge_symlinks) {
 		STRUCT_STAT st;
-		if (do_stat(SYMLINK_PREFIX, &st) == 0 && S_ISDIR(st.st_mode)) {
-			rprintf(FLOG, "Symlink munging is unsupported when a %s directory exists.\n",
-				SYMLINK_PREFIX);
+		char prefix[SYMLINK_PREFIX_LEN]; /* NOT +1 ! */
+		strlcpy(prefix, SYMLINK_PREFIX, sizeof prefix); /* trim the trailing slash */
+		if (do_stat(prefix, &st) == 0 && S_ISDIR(st.st_mode)) {
+			rprintf(FLOG, "Symlink munging is unsafe when a %s directory exists.\n",
+				prefix);
 			io_printf(f_out, "@ERROR: daemon security issue -- contact admin\n", name);
 			exit_cleanup(RERR_UNSUPPORTED);
 		}
 	}
 
-	if (am_root) {
-		/* XXXX: You could argue that if the daemon is started
-		 * by a non-root user and they explicitly specify a
-		 * gid, then we should try to change to that gid --
-		 * this could be possible if it's already in their
-		 * supplementary groups. */
-
-		/* TODO: Perhaps we need to document that if rsyncd is
-		 * started by somebody other than root it will inherit
-		 * all their supplementary groups. */
-
-		if (setgid(gid)) {
-			rsyserr(FLOG, errno, "setgid %d failed", (int)gid);
+	if (gid_list.count) {
+		gid_t *gid_array = gid_list.items;
+		if (setgid(gid_array[0])) {
+			rsyserr(FLOG, errno, "setgid %ld failed", (long)gid_array[0]);
 			io_printf(f_out, "@ERROR: setgid failed\n");
 			return -1;
 		}
 #ifdef HAVE_SETGROUPS
-		/* Get rid of any supplementary groups this process
-		 * might have inheristed. */
-		if (setgroups(1, &gid)) {
+		/* Set the group(s) we want to be active. */
+		if (setgroups(gid_list.count, gid_array)) {
 			rsyserr(FLOG, errno, "setgroups failed");
 			io_printf(f_out, "@ERROR: setgroups failed\n");
 			return -1;
 		}
 #endif
+#if defined HAVE_INITGROUPS && !defined HAVE_GETGROUPLIST
+		/* pw is set if the user wants all the user's groups. */
+		if (pw && initgroups(pw->pw_name, pw->pw_gid) < 0) {
+			rsyserr(FLOG, errno, "initgroups failed");
+			io_printf(f_out, "@ERROR: initgroups failed\n");
+			return -1;
+		}
+#endif
+	}
 
+	if (set_uid) {
 		if (setuid(uid) < 0
 #ifdef HAVE_SETEUID
 		 || seteuid(uid) < 0
 #endif
 		) {
-			rsyserr(FLOG, errno, "setuid %d failed", (int)uid);
+			rsyserr(FLOG, errno, "setuid %ld failed", (long)uid);
 			io_printf(f_out, "@ERROR: setuid failed\n");
 			return -1;
 		}
@@ -756,7 +865,9 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 	read_args(f_in, name, line, sizeof line, rl_nulls, &argv, &argc, &request);
 	orig_argv = argv;
 
-	verbose = 0; /* future verbosity is controlled by client options */
+	save_munge_symlinks = munge_symlinks;
+
+	reset_output_levels(); /* future verbosity is controlled by client options */
 	ret = parse_arguments(&argc, (const char ***) &argv);
 	if (protect_args && ret) {
 		orig_early_argv = orig_argv;
@@ -767,9 +878,11 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 	} else
 		orig_early_argv = NULL;
 
+	munge_symlinks = save_munge_symlinks; /* The client mustn't control this. */
+
 	if (pre_exec_pid) {
-		err_msg = finish_pre_exec(pre_exec_pid, pre_exec_fd, request,
-					  orig_early_argv, orig_argv);
+		err_msg = finish_pre_exec(pre_exec_pid, pre_exec_arg_fd, pre_exec_error_fd,
+					  request, orig_early_argv, orig_argv);
 	}
 
 	if (orig_early_argv)
@@ -807,13 +920,12 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 
 #ifndef DEBUG
 	/* don't allow the logs to be flooded too fast */
-	if (verbose > lp_max_verbosity(i))
-		verbose = lp_max_verbosity(i);
+	limit_output_verbosity(lp_max_verbosity(i));
 #endif
 
 	if (protocol_version < 23
 	    && (protocol_version == 22 || am_sender))
-		io_start_multiplex_out();
+		io_start_multiplex_out(f_out);
 	else if (!ret || err_msg) {
 		/* We have to get I/O multiplexing started so that we can
 		 * get the error back to the client.  This means getting
@@ -837,13 +949,19 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
 			if (files_from)
 				write_byte(f_out, 0);
 		}
-		io_start_multiplex_out();
+		io_start_multiplex_out(f_out);
 	}
 
 	if (!ret || err_msg) {
-		if (err_msg)
-			rwrite(FERROR, err_msg, strlen(err_msg), 0);
-		else
+		if (err_msg) {
+			while ((p = strchr(err_msg, '\n')) != NULL) {
+				int len = p - err_msg + 1;
+				rwrite(FERROR, err_msg, len, 0);
+				err_msg += len;
+			}
+			if (*err_msg)
+				rprintf(FERROR, "%s\n", err_msg);
+		} else
 			option_error();
 		msleep(400);
 		exit_cleanup(RERR_UNSUPPORTED);
@@ -891,7 +1009,7 @@ static int rsync_module(int f_in, int f_out, int i, char *addr, char *host)
    with "list = False". */
 static void send_listing(int fd)
 {
-	int n = lp_numservices();
+	int n = lp_num_modules();
 	int i;
 
 	for (i = 0; i < n; i++) {
@@ -920,7 +1038,7 @@ static int load_config(int globals_only)
 int start_daemon(int f_in, int f_out)
 {
 	char line[1024];
-	char *addr, *host;
+	const char *addr, *host;
 	int i;
 
 	io_set_sock_fds(f_in, f_out);
@@ -933,7 +1051,7 @@ int start_daemon(int f_in, int f_out)
 		exit_cleanup(RERR_SYNTAX);
 
 	addr = client_addr(f_in);
-	host = client_name(f_in);
+	host = lp_reverse_lookup(-1) ? client_name(f_in) : undetermined_hostname;
 	rprintf(FLOG, "connect from %s (%s)\n", host, addr);
 
 	if (!am_server) {
@@ -945,7 +1063,7 @@ int start_daemon(int f_in, int f_out)
 		return -1;
 
 	line[0] = 0;
-	if (!read_line_old(f_in, line, sizeof line))
+	if (!read_line_old(f_in, line, sizeof line, 0))
 		return -1;
 
 	if (!*line || strcmp(line, "#list") == 0) {
@@ -987,14 +1105,14 @@ static void create_pid_file(void)
 		return;
 
 	cleanup_set_pid(pid);
-	if ((fd = do_open(pid_file, O_WRONLY|O_CREAT|O_EXCL, 0666 & ~orig_umask)) == -1) {
+	if ((fd = do_open(pid_file, O_WRONLY|O_CREAT|O_EXCL, 0666)) == -1) {
 	  failure:
 		cleanup_set_pid(0);
 		fprintf(stderr, "failed to create pid file %s: %s\n", pid_file, strerror(errno));
 		rsyserr(FLOG, errno, "failed to create pid file %s", pid_file);
 		exit_cleanup(RERR_FILEIO);
 	}
-	snprintf(pidbuf, sizeof pidbuf, "%ld\n", (long)pid);
+	snprintf(pidbuf, sizeof pidbuf, "%d\n", (int)pid);
 	len = strlen(pidbuf);
 	if (write(fd, pidbuf, len) != len)
 		goto failure;
@@ -1055,6 +1173,7 @@ int daemon_main(void)
 		fprintf(stderr, "Failed to parse config file: %s\n", config_file);
 		exit_cleanup(RERR_SYNTAX);
 	}
+	set_dparams(0);
 
 	if (no_detach)
 		create_pid_file();

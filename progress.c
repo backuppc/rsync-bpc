@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,9 +21,12 @@
  */
 
 #include "rsync.h"
+#include "inums.h"
 
 extern int am_server;
+extern int flist_eof;
 extern int need_unsorted_flist;
+extern int output_needs_newline;
 extern struct stats stats;
 extern struct file_list *cur_flist;
 
@@ -39,8 +42,6 @@ struct progress_history {
 	struct timeval time;
 	OFF_T ofs;
 };
-
-int progress_is_active = 0;
 
 static struct progress_history ph_start;
 static struct progress_history ph_list[PROGRESS_HISTORY_SECS];
@@ -66,11 +67,26 @@ static void rprint_progress(OFF_T ofs, OFF_T size, struct timeval *now,
 {
 	char rembuf[64], eol[128];
 	const char *units;
-	int pct = ofs == size ? 100 : (int) (100.0 * ofs / size);
 	unsigned long diff;
 	double rate, remain;
+	int pct;
 
 	if (is_last) {
+		int len = snprintf(eol, sizeof eol,
+			" (xfr#%d, %s-chk=%d/%d)\n",
+			stats.xferred_files, flist_eof ? "to" : "ir",
+			stats.num_files - current_file_index - 1,
+			stats.num_files);
+		if (INFO_GTE(PROGRESS, 2)) {
+			static int last_len = 0;
+			/* Drop \n and pad with spaces if line got shorter. */
+			if (last_len < --len)
+				last_len = len;
+			eol[last_len] = '\0';
+			while (last_len > len)
+				eol[--last_len] = ' ';
+			is_last = 0;
+		}
 		/* Compute stats based on the starting info. */
 		if (!ph_start.time.tv_sec
 		    || !(diff = msdiff(&ph_start.time, now)))
@@ -79,6 +95,7 @@ static void rprint_progress(OFF_T ofs, OFF_T size, struct timeval *now,
 		/* Switch to total time taken for our last update. */
 		remain = (double) diff / 1000.0;
 	} else {
+		strlcpy(eol, "  ", sizeof eol);
 		/* Compute stats based on recent progress. */
 		if (!(diff = msdiff(&ph_list[oldest_hpos].time, now)))
 			diff = 1;
@@ -106,23 +123,21 @@ static void rprint_progress(OFF_T ofs, OFF_T size, struct timeval *now,
 			 (int) remain % 60);
 	}
 
-	if (is_last) {
-		snprintf(eol, sizeof eol, " (xfer#%d, to-check=%d/%d)\n",
-			stats.num_transferred_files,
-			stats.num_files - current_file_index - 1,
-			stats.num_files);
-	} else
-		strlcpy(eol, "\r", sizeof eol);
-	progress_is_active = 0;
-	rprintf(FCLIENT, "%12s %3d%% %7.2f%s %s%s",
+	output_needs_newline = 0;
+	pct = ofs == size ? 100 : (int) (100.0 * ofs / size);
+	rprintf(FCLIENT, "\r%15s %3d%% %7.2f%s %s%s",
 		human_num(ofs), pct, rate, units, rembuf, eol);
-	if (!is_last)
-		progress_is_active = 1;
+	if (!is_last) {
+		output_needs_newline = 1;
+		rflush(FCLIENT);
+	}
 }
 
 void set_current_file_index(struct file_struct *file, int ndx)
 {
-	if (need_unsorted_flist)
+	if (!file)
+		current_file_index = cur_flist->used + cur_flist->ndx_start - 1;
+	else if (need_unsorted_flist)
 		current_file_index = flist_find(cur_flist, file) + cur_flist->ndx_start;
 	else
 		current_file_index = ndx;
@@ -134,9 +149,14 @@ void end_progress(OFF_T size)
 	if (!am_server) {
 		struct timeval now;
 		gettimeofday(&now, NULL);
-		rprint_progress(size, size, &now, True);
+		if (INFO_GTE(PROGRESS, 2)) {
+			rprint_progress(stats.total_transferred_size,
+					stats.total_size, &now, True);
+		} else {
+			rprint_progress(size, size, &now, True);
+			memset(&ph_start, 0, sizeof ph_start);
+		}
 	}
-	memset(&ph_start, 0, sizeof ph_start);
 }
 
 void show_progress(OFF_T ofs, OFF_T size)
@@ -156,6 +176,11 @@ void show_progress(OFF_T ofs, OFF_T size)
 #endif
 
 	gettimeofday(&now, NULL);
+
+	if (INFO_GTE(PROGRESS, 2)) {
+		ofs = stats.total_transferred_size - size + ofs;
+		size = stats.total_size;
+	}
 
 	if (!ph_start.time.tv_sec) {
 		int i;

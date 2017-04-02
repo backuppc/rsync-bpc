@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2015 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,8 +20,8 @@
  */
 
 #include "rsync.h"
+#include "inums.h"
 
-extern int verbose;
 extern int do_xfers;
 extern int am_server;
 extern int am_daemon;
@@ -29,21 +29,25 @@ extern int inc_recurse;
 extern int log_before_transfer;
 extern int stdout_format_has_i;
 extern int logfile_format_has_i;
+extern int want_xattr_optim;
 extern int csum_length;
 extern int append_mode;
 extern int io_error;
+extern int flist_eof;
 extern int allowed_lull;
 extern int preserve_xattrs;
 extern int protocol_version;
 extern int remove_source_files;
 extern int updating_basis_file;
 extern int make_backups;
-extern int do_progress;
 extern int inplace;
 extern int batch_fd;
 extern int write_batch;
+extern int file_old_total;
 extern struct stats stats;
 extern struct file_list *cur_flist, *first_flist, *dir_flist;
+
+BOOL extra_flist_sending_enabled;
 
 /**
  * @file
@@ -60,7 +64,7 @@ static struct sum_struct *receive_sums(int f)
 {
 	struct sum_struct *s;
 	int32 i;
-	int lull_mod = allowed_lull * 5;
+	int lull_mod = protocol_version >= 31 ? 0 : allowed_lull * 5;
 	OFF_T offset = 0;
 
 	if (!(s = new(struct sum_struct)))
@@ -70,9 +74,9 @@ static struct sum_struct *receive_sums(int f)
 
 	s->sums = NULL;
 
-	if (verbose > 3) {
-		rprintf(FINFO, "count=%.0f n=%ld rem=%ld\n",
-			(double)s->count, (long)s->blength, (long)s->remainder);
+	if (DEBUG_GTE(DELTASUM, 3)) {
+		rprintf(FINFO, "count=%s n=%ld rem=%ld\n",
+			big_num(s->count), (long)s->blength, (long)s->remainder);
 	}
 
 	if (append_mode > 0) {
@@ -101,13 +105,13 @@ static struct sum_struct *receive_sums(int f)
 			s->sums[i].len = s->blength;
 		offset += s->sums[i].len;
 
-		if (allowed_lull && !(i % lull_mod))
-			maybe_send_keepalive();
+		if (lull_mod && !(i % lull_mod))
+			maybe_send_keepalive(time(NULL), True);
 
-		if (verbose > 3) {
+		if (DEBUG_GTE(DELTASUM, 3)) {
 			rprintf(FINFO,
-				"chunk[%d] len=%d offset=%.0f sum1=%08x\n",
-				i, s->sums[i].len, (double)s->sums[i].offset,
+				"chunk[%d] len=%d offset=%s sum1=%08x\n",
+				i, s->sums[i].len, big_num(s->sums[i].offset),
 				s->sums[i].sum1);
 		}
 	}
@@ -120,8 +124,10 @@ static struct sum_struct *receive_sums(int f)
 void successful_send(int ndx)
 {
 	char fname[MAXPATHLEN];
+	char *failed_op;
 	struct file_struct *file;
 	struct file_list *flist;
+	STRUCT_STAT st;
 
 	if (!remove_source_files)
 		return;
@@ -132,11 +138,32 @@ void successful_send(int ndx)
 		return;
 	f_name(file, fname);
 
-	if (do_unlink(fname) == 0) {
-		if (verbose > 1)
+	if (do_lstat(fname, &st) < 0) {
+		failed_op = "re-lstat";
+		goto failed;
+	}
+
+	if (S_ISREG(file->mode) /* Symlinks & devices don't need this check: */
+	 && (st.st_size != F_LENGTH(file) || st.st_mtime != file->modtime
+#ifdef ST_MTIME_NSEC
+	 || (NSEC_BUMP(file) && (uint32)st.ST_MTIME_NSEC != F_MOD_NSEC(file))
+#endif
+	)) {
+		rprintf(FERROR_XFER, "ERROR: Skipping sender remove for changed file: %s\n", fname);
+		return;
+	}
+
+	if (do_unlink(fname) < 0) {
+		failed_op = "remove";
+	  failed:
+		if (errno == ENOENT)
+			rprintf(FINFO, "sender file already removed: %s\n", fname);
+		else
+			rsyserr(FERROR_XFER, errno, "sender failed to %s %s", failed_op, fname);
+	} else {
+		if (INFO_GTE(REMOVE, 1))
 			rprintf(FINFO, "sender removed %s\n", fname);
-	} else
-		rsyserr(FERROR, errno, "sender failed to remove %s", fname);
+	}
 }
 
 static void write_ndx_and_attrs(int f_out, int ndx, int iflags,
@@ -152,7 +179,8 @@ static void write_ndx_and_attrs(int f_out, int ndx, int iflags,
 	if (iflags & ITEM_XNAME_FOLLOWS)
 		write_vstring(f_out, buf, len);
 #ifdef SUPPORT_XATTRS
-	if (preserve_xattrs && iflags & ITEM_REPORT_XATTR && do_xfers)
+	if (preserve_xattrs && iflags & ITEM_REPORT_XATTR && do_xfers
+	 && !(want_xattr_optim && BITS_SET(iflags, ITEM_XNAME_FOLLOWS|ITEM_LOCAL_CHANGE)))
 		send_xattr_request(fname, file, f_out);
 #endif
 }
@@ -169,41 +197,51 @@ void send_files(int f_in, int f_out)
 	int iflags, xlen;
 	struct file_struct *file;
 	int phase = 0, max_phase = protocol_version >= 29 ? 2 : 1;
-	struct stats initial_stats;
 	int itemizing = am_server ? logfile_format_has_i : stdout_format_has_i;
 	enum logcode log_code = log_before_transfer ? FLOG : FINFO;
 	int f_xfer = write_batch < 0 ? batch_fd : f_out;
 	int save_io_error = io_error;
 	int ndx, j;
 
-	if (verbose > 2)
+	if (DEBUG_GTE(SEND, 1))
 		rprintf(FINFO, "send_files starting\n");
 
 	while (1) {
-		if (inc_recurse)
-			send_extra_file_list(f_out, FILECNT_LOOKAHEAD);
+		if (inc_recurse) {
+			send_extra_file_list(f_out, MIN_FILECNT_LOOKAHEAD);
+			extra_flist_sending_enabled = !flist_eof;
+		}
 
 		/* This call also sets cur_flist. */
-		ndx = read_ndx_and_attrs(f_in, &iflags, &fnamecmp_type,
+		ndx = read_ndx_and_attrs(f_in, f_out, &iflags, &fnamecmp_type,
 					 xname, &xlen);
+		extra_flist_sending_enabled = False;
+
 		if (ndx == NDX_DONE) {
+			if (!am_server && INFO_GTE(PROGRESS, 2) && cur_flist) {
+				set_current_file_index(NULL, 0);
+				end_progress(0);
+			}
 			if (inc_recurse && first_flist) {
+				file_old_total -= first_flist->used;
 				flist_free(first_flist);
 				if (first_flist) {
+					if (first_flist == cur_flist)
+						file_old_total = cur_flist->used;
 					write_ndx(f_out, NDX_DONE);
 					continue;
 				}
 			}
 			if (++phase > max_phase)
 				break;
-			if (verbose > 2)
+			if (DEBUG_GTE(SEND, 1))
 				rprintf(FINFO, "send_files phase=%d\n", phase);
 			write_ndx(f_out, NDX_DONE);
 			continue;
 		}
 
 		if (inc_recurse)
-			send_extra_file_list(f_out, FILECNT_LOOKAHEAD);
+			send_extra_file_list(f_out, MIN_FILECNT_LOOKAHEAD);
 
 		if (ndx - cur_flist->ndx_start >= 0)
 			file = cur_flist->files[ndx - cur_flist->ndx_start];
@@ -219,11 +257,12 @@ void send_files(int f_in, int f_out)
 			continue;
 		f_name(file, fname);
 
-		if (verbose > 2)
+		if (DEBUG_GTE(SEND, 1))
 			rprintf(FINFO, "send_files(%d, %s%s%s)\n", ndx, path,slash,fname);
 
 #ifdef SUPPORT_XATTRS
-		if (preserve_xattrs && iflags & ITEM_REPORT_XATTR && do_xfers)
+		if (preserve_xattrs && iflags & ITEM_REPORT_XATTR && do_xfers
+		 && !(want_xattr_optim && BITS_SET(iflags, ITEM_XNAME_FOLLOWS|ITEM_LOCAL_CHANGE)))
 			recv_xattr_request(file, f_in);
 #endif
 
@@ -231,6 +270,21 @@ void send_files(int f_in, int f_out)
 			maybe_log_item(file, iflags, itemizing, xname);
 			write_ndx_and_attrs(f_out, ndx, iflags, fname, file,
 					    fnamecmp_type, xname, xlen);
+			if (iflags & ITEM_IS_NEW) {
+				stats.created_files++;
+				if (S_ISREG(file->mode)) {
+					/* Nothing further to count. */
+				} else if (S_ISDIR(file->mode))
+					stats.created_dirs++;
+#ifdef SUPPORT_LINKS
+				else if (S_ISLNK(file->mode))
+					stats.created_symlinks++;
+#endif
+				else if (IS_DEVICE(file->mode))
+					stats.created_devices++;
+				else
+					stats.created_specials++;
+			}
 			continue;
 		}
 		if (phase == 2) {
@@ -254,26 +308,28 @@ void send_files(int f_in, int f_out)
 				append_mode = -append_mode;
 				csum_length = SHORT_SUM_LENGTH;
 			}
+			if (iflags & ITEM_IS_NEW)
+				stats.created_files++;
 		}
 
 		updating_basis_file = inplace && (protocol_version >= 29
 			? fnamecmp_type == FNAMECMP_FNAME : make_backups <= 0);
 
-		if (!am_server && do_progress)
+		if (!am_server && INFO_GTE(PROGRESS, 1))
 			set_current_file_index(file, ndx);
-		stats.num_transferred_files++;
+		stats.xferred_files++;
 		stats.total_transferred_size += F_LENGTH(file);
+
+		remember_initial_stats();
 
                 bpc_sysCall_statusFileSize(F_LENGTH(file));
 
 		if (!do_xfers) { /* log the transfer */
-			log_item(FCLIENT, file, &stats, iflags, NULL);
+			log_item(FCLIENT, file, iflags, NULL);
 			write_ndx_and_attrs(f_out, ndx, iflags, fname, file,
 					    fnamecmp_type, xname, xlen);
 			continue;
 		}
-
-		initial_stats = stats;
 
 		if (!(s = receive_sums(f_in))) {
 			io_error |= IOERR_GENERAL;
@@ -308,7 +364,7 @@ void send_files(int f_in, int f_out)
 			rsyserr(FERROR_XFER, errno, "fstat failed");
 			free_sums(s);
 			bpc_close(fd);
-			exit_cleanup(RERR_PROTOCOL);
+			exit_cleanup(RERR_FILEIO);
 		}
 
 		if (st.st_size) {
@@ -317,30 +373,30 @@ void send_files(int f_in, int f_out)
 		} else
 			mbuf = NULL;
 
-		if (verbose > 2) {
-			rprintf(FINFO, "send_files mapped %s%s%s of size %.0f\n",
-				path,slash,fname, (double)st.st_size);
+		if (DEBUG_GTE(DELTASUM, 2)) {
+			rprintf(FINFO, "send_files mapped %s%s%s of size %s\n",
+				path,slash,fname, big_num(st.st_size));
 		}
 
 		write_ndx_and_attrs(f_out, ndx, iflags, fname, file,
 				    fnamecmp_type, xname, xlen);
 		write_sum_head(f_xfer, s);
 
-		if (verbose > 2)
+		if (DEBUG_GTE(DELTASUM, 2))
 			rprintf(FINFO, "calling match_sums %s%s%s\n", path,slash,fname);
 
 		if (log_before_transfer)
-			log_item(FCLIENT, file, &initial_stats, iflags, NULL);
-		else if (!am_server && verbose && do_progress)
+			log_item(FCLIENT, file, iflags, NULL);
+		else if (!am_server && INFO_GTE(NAME, 1) && INFO_EQ(PROGRESS, 1))
 			rprintf(FCLIENT, "%s\n", fname);
 
 		set_compression(fname);
 
 		match_sums(f_xfer, s, mbuf, st.st_size);
-		if (do_progress)
+		if (INFO_GTE(PROGRESS, 1))
 			end_progress(st.st_size);
 
-		log_item(log_code, file, &initial_stats, iflags, NULL);
+		log_item(log_code, file, iflags, NULL);
 
 		if (mbuf) {
 			j = unmap_file(mbuf);
@@ -355,7 +411,7 @@ void send_files(int f_in, int f_out)
 
 		free_sums(s);
 
-		if (verbose > 2)
+		if (DEBUG_GTE(SEND, 1))
 			rprintf(FINFO, "sender finished %s%s%s\n", path,slash,fname);
 
 		/* Flag that we actually sent this entry. */
@@ -367,7 +423,7 @@ void send_files(int f_in, int f_out)
 	if (io_error != save_io_error && protocol_version >= 30)
 		send_msg_int(MSG_IO_ERROR, io_error);
 
-	if (verbose > 2)
+	if (DEBUG_GTE(SEND, 1))
 		rprintf(FINFO, "send files finished\n");
 
 	match_report();

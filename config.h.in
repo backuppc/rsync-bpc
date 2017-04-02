@@ -23,6 +23,9 @@
 /* Define to 1 if using `alloca.c'. */
 #undef C_ALLOCA
 
+/* Define to 1 if using external zlib */
+#undef EXTERNAL_ZLIB
+
 /* Used to make "checker" understand that FD_ZERO() clears memory. */
 #undef FORCE_FD_ZERO_MEMSET
 
@@ -61,6 +64,9 @@
 /* Define to 1 if you have the `asprintf' function. */
 #undef HAVE_ASPRINTF
 
+/* Define to 1 if you have the `attropen' function. */
+#undef HAVE_ATTROPEN
+
 /* Define to 1 if you have the <attr/xattr.h> header file. */
 #undef HAVE_ATTR_XATTR_H
 
@@ -89,11 +95,18 @@
    */
 #undef HAVE_DIRENT_H
 
+/* Define if posix_fallocate is efficient (Cygwin) */
+#undef HAVE_EFFICIENT_POSIX_FALLOCATE
+
 /* Define to 1 if errno is declared in errno.h */
 #undef HAVE_ERRNO_DECL
 
 /* Define to 1 if you have the `extattr_get_link' function. */
 #undef HAVE_EXTATTR_GET_LINK
+
+/* Define to 1 if you have the fallocate function and it compiles and links
+   without error */
+#undef HAVE_FALLOCATE
 
 /* Define to 1 if you have the `fchmod' function. */
 #undef HAVE_FCHMOD
@@ -125,8 +138,14 @@
 /* Define to 1 if you have the `geteuid' function. */
 #undef HAVE_GETEUID
 
+/* Define to 1 if you have the `getgrouplist' function. */
+#undef HAVE_GETGROUPLIST
+
 /* Define to 1 if you have the `getgroups' function. */
 #undef HAVE_GETGROUPS
+
+/* Define to 1 if you have the `getpass' function. */
+#undef HAVE_GETPASS
 
 /* Define to 1 if you have the `getpgrp' function. */
 #undef HAVE_GETPGRP
@@ -158,6 +177,9 @@
 /* Define to 1 if you have the `inet_pton' function. */
 #undef HAVE_INET_PTON
 
+/* Define to 1 if you have the `initgroups' function. */
+#undef HAVE_INITGROUPS
+
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
 
@@ -175,6 +197,9 @@
 
 /* Define to 1 if you have the `acl' library (-lacl). */
 #undef HAVE_LIBACL
+
+/* Define to 1 if you have the `attr' library (-lattr). */
+#undef HAVE_LIBATTR
 
 /* Define to 1 if you have the <libcharset.h> header file. */
 #undef HAVE_LIBCHARSET_H
@@ -200,13 +225,19 @@
 /* Define to 1 if you have the `socket' library (-lsocket). */
 #undef HAVE_LIBSOCKET
 
+/* Define to 1 if you have the `z' library (-lz). */
+#undef HAVE_LIBZ
+
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
 
 /* Define to 1 if you have the `link' function. */
 #undef HAVE_LINK
 
-/* True if you have Linux xattrs */
+/* Define to 1 if you have the <linux/falloc.h> header file. */
+#undef HAVE_LINUX_FALLOC_H
+
+/* True if you have Linux xattrs (or equivalent) */
 #undef HAVE_LINUX_XATTRS
 
 /* Define to 1 if you have the `locale_charset' function. */
@@ -298,6 +329,9 @@
 /* true if you have posix ACLs */
 #undef HAVE_POSIX_ACLS
 
+/* Define to 1 if you have the `posix_fallocate' function. */
+#undef HAVE_POSIX_FALLOCATE
+
 /* Define to 1 if you have the `putenv' function. */
 #undef HAVE_PUTENV
 
@@ -328,6 +362,9 @@
 /* Define to 1 if you have the `setsid' function. */
 #undef HAVE_SETSID
 
+/* Define to 1 if you have the `setvbuf' function. */
+#undef HAVE_SETVBUF
+
 /* Define to 1 if you have the `sigaction' function. */
 #undef HAVE_SIGACTION
 
@@ -357,6 +394,9 @@
 
 /* true if you have solaris ACLs */
 #undef HAVE_SOLARIS_ACLS
+
+/* True if you have Solaris xattrs */
+#undef HAVE_SOLARIS_XATTRS
 
 /* Define to 1 if you have the <stdint.h> header file. */
 #undef HAVE_STDINT_H
@@ -406,6 +446,12 @@
 /* Define to 1 if the system has the type `struct stat64'. */
 #undef HAVE_STRUCT_STAT64
 
+/* Define to 1 if `st_mtimensec' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_MTIMENSEC
+
+/* Define to 1 if `st_mtim.tv_nsec' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC
+
 /* Define to 1 if `st_rdev' is a member of `struct stat'. */
 #undef HAVE_STRUCT_STAT_ST_RDEV
 
@@ -424,6 +470,9 @@
 
 /* Define to 1 if you have the <sys/extattr.h> header file. */
 #undef HAVE_SYS_EXTATTR_H
+
+/* Define to 1 if you have the SYS_fallocate syscall number */
+#undef HAVE_SYS_FALLOCATE
 
 /* Define to 1 if you have the <sys/fcntl.h> header file. */
 #undef HAVE_SYS_FCNTL_H
@@ -483,6 +532,9 @@
 /* true if you have UnixWare ACLs */
 #undef HAVE_UNIXWARE_ACLS
 
+/* Define to 1 if you have the `usleep' function. */
+#undef HAVE_USLEEP
+
 /* Define to 1 if you have the `utime' function. */
 #undef HAVE_UTIME
 
@@ -512,6 +564,9 @@
 
 /* Define to 1 if you have the `waitpid' function. */
 #undef HAVE_WAITPID
+
+/* Define to 1 if you have the <zlib.h> header file. */
+#undef HAVE_ZLIB_H
 
 /* Define to 1 if you have the `_acl' function. */
 #undef HAVE__ACL
@@ -567,6 +622,9 @@
 /* True if special files do not support xattrs */
 #undef NO_SPECIAL_XATTRS
 
+/* True if symlinks do not support user xattrs */
+#undef NO_SYMLINK_USER_XATTRS
+
 /* True if symlinks do not support xattrs */
 #undef NO_SYMLINK_XATTRS
 
@@ -588,9 +646,6 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
-/* Define as the return type of signal handlers (`int' or `void'). */
-#undef RETSIGTYPE
-
 /* location of configuration file for rsync server */
 #undef RSYNCD_SYSCONF
 
@@ -599,6 +654,9 @@
 
 /* default -e command */
 #undef RSYNC_RSH
+
+/* Define to 1 if --protected-args should be the default */
+#undef RSYNC_USE_PROTECTED_ARGS
 
 /* rsync release version */
 #undef RSYNC_VERSION
@@ -681,6 +739,11 @@
 # ifndef WORDS_BIGENDIAN
 #  undef WORDS_BIGENDIAN
 # endif
+#endif
+
+/* Enable large inode numbers on Mac OS X 10.5.  */
+#ifndef _DARWIN_USE_64_BIT_INODE
+# define _DARWIN_USE_64_BIT_INODE 1
 #endif
 
 /* Number of bits in a file offset, on hosts where this is settable. */
