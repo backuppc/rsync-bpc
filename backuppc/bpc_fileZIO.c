@@ -266,7 +266,7 @@ ssize_t bpc_fileZIO_write(bpc_fileZIO_fd *fd, uchar *buf, size_t nWrite)
 {
     if ( !fd->write || fd->fd < 0 ) return -1;
     if ( fd->eof ) return 0;
-    if ( fd->writeTeeStderr ) (void)fwrite((char*)buf, nWrite, 1, stderr);
+    if ( fd->writeTeeStderr && nWrite > 0 ) (void)fwrite((char*)buf, nWrite, 1, stderr);
     if ( fd->compressLevel == 0 ) {
         int thisWrite, totalWrite = 0;
         while ( nWrite > 0 ) {
