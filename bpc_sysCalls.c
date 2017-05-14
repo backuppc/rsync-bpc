@@ -1002,6 +1002,8 @@ int bpc_unlink(const char *fileName)
                 if ( LogLevel >= 6 ) bpc_logMsgf("bpc_unlink: setting %s in old (inode = %lu, nlinks = %lu)\n",
                                                   fileName, (unsigned long)file->inode, (unsigned long)file->nlinks);
                 bpc_attribCache_setFile(&acOld, (char*)fileName, file, 0);
+                bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
+                bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, -1);
             }
         } else if ( !file->isTemp ) {
             if ( file->digest.len > 0 ) {
