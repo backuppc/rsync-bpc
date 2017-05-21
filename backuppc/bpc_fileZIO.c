@@ -50,17 +50,6 @@ int bpc_fileZIO_open(bpc_fileZIO_fd *fd, char *fileName, int writeFile, int comp
     fd->lineBufEof     = 0;
 
     fd->bufSize = 1 << 20;       /* 1MB */
-    if ( DataBufferFreeList ) {
-        fd->buf = DataBufferFreeList;
-        DataBufferFreeList = *(void**)DataBufferFreeList;
-    } else {
-        fd->buf = malloc(fd->bufSize);
-    }
-    if ( !fd->buf ) {
-        bpc_logErrf("bpc_fileZIO_open: fatal error: can't allocate %u bytes\n", (unsigned)fd->bufSize);
-        return -1;
-    }
-
     if ( writeFile ) {
         fd->fd = open(fileName, O_WRONLY | O_CREAT | O_TRUNC, 0660);
         if ( fd->fd < 0 ) {
@@ -90,6 +79,16 @@ int bpc_fileZIO_open(bpc_fileZIO_fd *fd, char *fileName, int writeFile, int comp
             }
             fd->strm.avail_in = 0;
         }
+    }
+    if ( DataBufferFreeList ) {
+        fd->buf = DataBufferFreeList;
+        DataBufferFreeList = *(void**)DataBufferFreeList;
+    } else {
+        fd->buf = malloc(fd->bufSize);
+    }
+    if ( !fd->buf ) {
+        bpc_logErrf("bpc_fileZIO_open: fatal error: can't allocate %u bytes\n", (unsigned)fd->bufSize);
+        return -1;
     }
     if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_fileZIO_open(%s, %d, %d) -> %d\n", fileName, writeFile, compressLevel, fd->fd);
     return 0;

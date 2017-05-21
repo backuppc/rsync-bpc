@@ -476,7 +476,7 @@ void bpc_poolRefDeltaUpdate(bpc_deltaCount_info *info, int compress, bpc_digest 
         char hexStr[BPC_DIGEST_LEN_MAX * 2 + 1];
 
         bpc_digest_digest2str(&digestInfo->digest, hexStr);
-        bpc_logMsgf("bpc_poolRefDeltaUpdate(%s, %d, %d), count now %d\n", hexStr, count, compress, digestInfo->count);
+        bpc_logMsgf("bpc_poolRefDeltaUpdate(%s, %d), count now %d\n", hexStr, count, digestInfo->count);
     }
     if ( bpc_hashtable_entryCount(&info->refCnt[compress ? 1 : 0].ht) > (1 << 20) ) {
         bpc_poolRefDeltaFileFlush(info);

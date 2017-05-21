@@ -218,8 +218,8 @@ int bpc_path_refCountAll(bpc_deltaCount_info *deltaInfo, char *path, int compres
                 } else {
                     if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_path_refCountAll: adjusting ref counts from attrib file %s\n", filePath);
                     bpc_attrib_dirRefCount(deltaInfo, &dir, incr);
-                    bpc_attrib_dirDestroy(&dir);
                 }
+                bpc_attrib_dirDestroy(&dir);
             }
         }
     }
