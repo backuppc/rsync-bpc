@@ -1,5 +1,11 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.7 released 25 May 2017:
+
+    - fixed reference counting bug in bpc_unlink()
+
+    - fixed memory leak on file open fail in backuppc/bpc_fileZIO.c, and minor leak in backuppc/bpc_dirOps.c
+
 3.0.9.6 released 23 Mar 2017:
 
     - updates to bpc_attribCache to sanitize path names and prepending ac->currentDir
