@@ -1325,7 +1325,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 				}
 				need_fuzzy_dirlist = 1;
 			}
-#ifdef SUPPORT_ACLS
+#if 0 /* was SUPPORT_ACLS */
 			if (!preserve_perms)
 				dflt_perms = default_perms_for_dir(dn);
 #endif

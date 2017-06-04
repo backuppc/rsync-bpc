@@ -293,7 +293,6 @@ enum delret {
 #undef NO_DEVICE_XATTRS
 #undef NO_SPECIAL_XATTRS
 #undef NO_SYMLINK_XATTRS
-#undef SUPPORT_ACLS
 
 #define SUPPORT_HARD_LINKS 1
 #define SUPPORT_LINKS 1

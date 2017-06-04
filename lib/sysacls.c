@@ -24,8 +24,6 @@
 #include "rsync.h"
 #include "sysacls.h"
 
-#if 0
-
 #ifdef DEBUG
 #undef DEBUG
 #endif
@@ -2792,5 +2790,3 @@ int no_acl_syscall_error(int err)
 	}
 	return 0;
 }
-
-#endif /* 0  */

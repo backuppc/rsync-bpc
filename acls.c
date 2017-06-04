@@ -112,6 +112,27 @@ static const char *str_acl_type(SMB_ACL_TYPE_T type)
 	return "unknown ACL type!";
 }
 
+static int calc_sacl_entries(const rsync_acl *racl)
+{
+	/* A System ACL always gets user/group/other permission entries. */
+	return racl->names.count
+#ifdef ACLS_NEED_MASK
+	     + 1
+#else
+	     + (racl->mask_obj != NO_ENTRY)
+#endif
+	     + 3;
+}
+
+/* Extracts and returns the permission bits from the ACL.  This cannot be
+ * called on an rsync_acl that has NO_ENTRY in any spot but the mask. */
+static int rsync_acl_get_perms(const rsync_acl *racl)
+{
+	return (racl->user_obj << 6)
+	     + ((racl->mask_obj != NO_ENTRY ? racl->mask_obj : racl->group_obj) << 3)
+	     + racl->other_obj;
+}
+
 /* Removes the permission-bit entries from the ACL because these
  * can be reconstructed from the file's mode. */
 static void rsync_acl_strip_perms(stat_x *sxp)
@@ -245,6 +266,97 @@ static int id_access_sorter(const void *r1, const void *r2)
 #endif
 
 /* === System ACLs === */
+
+/* Unpack system ACL -> rsync ACL verbatim.  Return whether we succeeded. */
+static BOOL unpack_smb_acl(SMB_ACL_T sacl, rsync_acl *racl)
+{
+	static item_list temp_ida_list = EMPTY_ITEM_LIST;
+	SMB_ACL_ENTRY_T entry;
+	const char *errfun;
+	int rc;
+
+	errfun = "sys_acl_get_entry";
+	for (rc = sys_acl_get_entry(sacl, SMB_ACL_FIRST_ENTRY, &entry);
+	     rc == 1;
+	     rc = sys_acl_get_entry(sacl, SMB_ACL_NEXT_ENTRY, &entry)) {
+		SMB_ACL_TAG_T tag_type;
+		uint32 access;
+		id_t g_u_id;
+		id_access *ida;
+		if ((rc = sys_acl_get_info(entry, &tag_type, &access, &g_u_id)) != 0) {
+			errfun = "sys_acl_get_info";
+			break;
+		}
+		/* continue == done with entry; break == store in temporary ida list */
+		switch (tag_type) {
+#ifndef HAVE_OSX_ACLS
+		case SMB_ACL_USER_OBJ:
+			if (racl->user_obj == NO_ENTRY)
+				racl->user_obj = access;
+			else
+				rprintf(FINFO, "unpack_smb_acl: warning: duplicate USER_OBJ entry ignored\n");
+			continue;
+		case SMB_ACL_GROUP_OBJ:
+			if (racl->group_obj == NO_ENTRY)
+				racl->group_obj = access;
+			else
+				rprintf(FINFO, "unpack_smb_acl: warning: duplicate GROUP_OBJ entry ignored\n");
+			continue;
+		case SMB_ACL_MASK:
+			if (racl->mask_obj == NO_ENTRY)
+				racl->mask_obj = access;
+			else
+				rprintf(FINFO, "unpack_smb_acl: warning: duplicate MASK entry ignored\n");
+			continue;
+		case SMB_ACL_OTHER:
+			if (racl->other_obj == NO_ENTRY)
+				racl->other_obj = access;
+			else
+				rprintf(FINFO, "unpack_smb_acl: warning: duplicate OTHER entry ignored\n");
+			continue;
+#endif
+		case SMB_ACL_USER:
+			access |= NAME_IS_USER;
+			break;
+		case SMB_ACL_GROUP:
+			break;
+		default:
+			rprintf(FINFO, "unpack_smb_acl: warning: entry with unrecognized tag type ignored\n");
+			continue;
+		}
+		ida = EXPAND_ITEM_LIST(&temp_ida_list, id_access, -10);
+		ida->id = g_u_id;
+		ida->access = access;
+	}
+	if (rc) {
+		rsyserr(FERROR_XFER, errno, "unpack_smb_acl: %s()", errfun);
+		rsync_acl_free(racl);
+		return False;
+	}
+
+	/* Transfer the count id_access items out of the temp_ida_list
+	 * into the names ida_entries list in racl. */
+	if (temp_ida_list.count) {
+#ifdef SMB_ACL_NEED_SORT
+		if (temp_ida_list.count > 1) {
+			qsort(temp_ida_list.items, temp_ida_list.count,
+			      sizeof (id_access), id_access_sorter);
+		}
+#endif
+		if (!(racl->names.idas = new_array(id_access, temp_ida_list.count)))
+			out_of_memory("unpack_smb_acl");
+		memcpy(racl->names.idas, temp_ida_list.items,
+		       temp_ida_list.count * sizeof (id_access));
+	} else
+		racl->names.idas = NULL;
+
+	racl->names.count = temp_ida_list.count;
+
+	/* Truncate the temporary list now that its idas have been saved. */
+	temp_ida_list.count = 0;
+
+	return True;
+}
 
 /* Synactic sugar for system calls */
 
@@ -721,6 +833,114 @@ void cache_tmp_acl(struct file_struct *file, stat_x *sxp)
 				      SMB_ACL_TYPE_DEFAULT, &default_acl_list);
 	}
 }
+
+static void uncache_duo_acls(item_list *duo_list, size_t start)
+{
+	acl_duo *duo_item = duo_list->items;
+	acl_duo *duo_start = duo_item + start;
+
+	duo_item += duo_list->count;
+	duo_list->count = start;
+
+	while (duo_item-- > duo_start) {
+		rsync_acl_free(&duo_item->racl);
+		if (duo_item->sacl)
+			sys_acl_free_acl(duo_item->sacl);
+	}
+}
+
+void uncache_tmp_acls(void)
+{
+	if (prior_access_count != (size_t)-1) {
+		uncache_duo_acls(&access_acl_list, prior_access_count);
+		prior_access_count = (size_t)-1;
+	}
+
+	if (prior_default_count != (size_t)-1) {
+		uncache_duo_acls(&default_acl_list, prior_default_count);
+		prior_default_count = (size_t)-1;
+	}
+}
+
+#ifndef HAVE_OSX_ACLS
+static mode_t change_sacl_perms(SMB_ACL_T sacl, rsync_acl *racl, mode_t old_mode, mode_t mode)
+{
+	SMB_ACL_ENTRY_T entry;
+	const char *errfun;
+	int rc;
+
+	if (S_ISDIR(mode)) {
+		/* If the sticky bit is going on, it's not safe to allow all
+		 * the new ACL to go into effect before it gets set. */
+#ifdef SMB_ACL_LOSES_SPECIAL_MODE_BITS
+		if (mode & S_ISVTX)
+			mode &= ~0077;
+#else
+		if (mode & S_ISVTX && !(old_mode & S_ISVTX))
+			mode &= ~0077;
+	} else {
+		/* If setuid or setgid is going off, it's not safe to allow all
+		 * the new ACL to go into effect before they get cleared. */
+		if ((old_mode & S_ISUID && !(mode & S_ISUID))
+		 || (old_mode & S_ISGID && !(mode & S_ISGID)))
+			mode &= ~0077;
+#endif
+	}
+
+	errfun = "sys_acl_get_entry";
+	for (rc = sys_acl_get_entry(sacl, SMB_ACL_FIRST_ENTRY, &entry);
+	     rc == 1;
+	     rc = sys_acl_get_entry(sacl, SMB_ACL_NEXT_ENTRY, &entry)) {
+		SMB_ACL_TAG_T tag_type;
+		if ((rc = sys_acl_get_tag_type(entry, &tag_type)) != 0) {
+			errfun = "sys_acl_get_tag_type";
+			break;
+		}
+		switch (tag_type) {
+		case SMB_ACL_USER_OBJ:
+			COE2( store_access_in_entry,((mode >> 6) & 7, entry) );
+			break;
+		case SMB_ACL_GROUP_OBJ:
+			/* group is only empty when identical to group perms. */
+			if (racl->group_obj != NO_ENTRY)
+				break;
+			COE2( store_access_in_entry,((mode >> 3) & 7, entry) );
+			break;
+		case SMB_ACL_MASK:
+#ifndef HAVE_SOLARIS_ACLS
+#ifndef ACLS_NEED_MASK
+			/* mask is only empty when we don't need it. */
+			if (racl->mask_obj == NO_ENTRY)
+				break;
+#endif
+			COE2( store_access_in_entry,((mode >> 3) & 7, entry) );
+#endif
+			break;
+		case SMB_ACL_OTHER:
+			COE2( store_access_in_entry,(mode & 7, entry) );
+			break;
+		}
+	}
+	if (rc) {
+	  error_exit:
+		if (errfun) {
+			rsyserr(FERROR_XFER, errno, "change_sacl_perms: %s()",
+				errfun);
+		}
+		return (mode_t)-1;
+	}
+
+#ifdef SMB_ACL_LOSES_SPECIAL_MODE_BITS
+	/* Ensure that chmod() will be called to restore any lost setid bits. */
+	if (old_mode & (S_ISUID | S_ISGID | S_ISVTX)
+	 && BITS_EQUAL(old_mode, mode, CHMOD_BITS))
+		old_mode &= ~(S_ISUID | S_ISGID | S_ISVTX);
+#endif
+
+	/* Return the mode of the file on disk, as we will set them. */
+	return (old_mode & ~ACCESSPERMS) | (mode & ACCESSPERMS);
+}
+#endif
 
 static int set_rsync_acl(const char *fname, acl_duo *duo_item,
 			 SMB_ACL_TYPE_T type, UNUSED(stat_x *sxp), UNUSED(mode_t mode))
