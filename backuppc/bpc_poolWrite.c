@@ -361,7 +361,8 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                 if ( st.st_size > 0 ) {
                     bpc_candidate_file *candidateFile;
                     if ( (st.st_mode & S_IXOTH) && bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
-                        if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Couldn't unmark candidate matching file %s (skipped)\n", poolPath);
+                        bpc_logErrf("Couldn't unmark candidate matching file %s (skipped; errno = %d)\n", poolPath, errno);
+                        info->errorCnt++;
                         break;
                     }
                     candidateFile = malloc(sizeof(bpc_candidate_file));
@@ -874,12 +875,12 @@ int bpc_poolWrite_unmarkPendingDelete(char *poolPath)
     if ( !(p = strrchr(lockFile, '/')) ) return -1;
     snprintf(p + 1, BPC_MAXPATHLEN - (p + 1 - lockFile), "%s", "LOCK");
     if ( (lockFd = bpc_lockRangeFile(lockFile, 0, 1, 1)) < 0 ) return -1;
-    if ( !stat(poolPath, &st) && !chmod(poolPath, st.st_mode & ~S_IXOTH) ) {
+    if ( !stat(poolPath, &st) && !chmod(poolPath, st.st_mode & ~S_IXOTH & ~S_IFMT) ) {
         if ( BPC_LogLevel >= 7 ) bpc_logMsgf("bpc_poolWrite_unmarkPendingDelete(%s) succeeded\n", poolPath);
         bpc_unlockRangeFile(lockFd);
         return 0;
     } else {
-        if ( BPC_LogLevel >= 7 ) bpc_logMsgf("bpc_poolWrite_unmarkPendingDelete(%s) failed\n", poolPath);
+        bpc_logErrf("bpc_poolWrite_unmarkPendingDelete(%s) failed; errno = %d\n", poolPath, errno);
         bpc_unlockRangeFile(lockFd);
         return -1;
     }
