@@ -764,10 +764,11 @@ else
     AC_MSG_RESULT(no)
 fi
 
-# We default to using our zlib unless --with-included-zlib=no is given.
-if test x"$with_included_zlib" != x"no"; then
-    with_included_zlib=yes
-elif test x"$ac_cv_header_zlib_h" != x"yes"; then
+# We default to not using our zlib unless --with-included-zlib=yes is given.
+if test x"$with_included_zlib" != x"yes"; then
+    with_included_zlib=no
+fi
+if test x"$ac_cv_header_zlib_h" != x"yes"; then
     with_included_zlib=yes
 fi
 if test x"$with_included_zlib" != x"yes"; then
