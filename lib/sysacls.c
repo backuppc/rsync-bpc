@@ -450,7 +450,7 @@ SMB_ACL_T sys_acl_get_file(const char *path_p, SMB_ACL_TYPE_T type)
 	 *
 	 * Note: we assume that the acl() system call returned a
 	 * well formed ACL which is sorted so that all of the
-	 * access ACL entries preceed any default ACL entries
+	 * access ACL entries precede any default ACL entries
 	 */
 	for (naccess = 0; naccess < count; naccess++) {
 		if (acl_d->acl[naccess].a_type & ACL_DEFAULT)
@@ -928,7 +928,7 @@ SMB_ACL_T sys_acl_get_file(const char *path_p, SMB_ACL_TYPE_T type)
 	 *
 	 * Note: we assume that the acl() system call returned a
 	 * well formed ACL which is sorted so that all of the
-	 * access ACL entries preceed any default ACL entries
+	 * access ACL entries precede any default ACL entries
 	 */
 	for (naccess = 0; naccess < count; naccess++) {
 		if (acl_d->acl[naccess].a_type & ACL_DEFAULT)
@@ -1252,7 +1252,7 @@ static int hpux_acl_sort(int acl_count, int calclass, struct acl *aclp)
 {
 #if !defined(HAVE_HPUX_ACLSORT)
 	/*
-	 * The aclsort() system call is availabe on the latest HPUX General
+	 * The aclsort() system call is available on the latest HPUX General
 	 * Patch Bundles. So for HPUX, we developed our version of acl_sort 
 	 * function. Because, we don't want to update to a new 
 	 * HPUX GR bundle just for aclsort() call.

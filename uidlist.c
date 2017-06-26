@@ -190,7 +190,7 @@ static struct idlist *recv_add_gid(gid_t id, const char *name)
 	return node;
 }
 
-/* this function is a definate candidate for a faster algorithm */
+/* this function is a definite candidate for a faster algorithm */
 uid_t match_uid(uid_t uid)
 {
 	static uid_t last_in, last_out;

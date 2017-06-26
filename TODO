@@ -236,7 +236,7 @@ Memory accounting
 
   At exit, show how much memory was used for the file list, etc.
 
-  Also we do a wierd exponential-growth allocation in flist.c.  I'm
+  Also we do a weird exponential-growth allocation in flist.c.  I'm
   not sure this makes sense with modern mallocs.  At any rate it will
   make us allocate a huge amount of memory for large file lists.
 
