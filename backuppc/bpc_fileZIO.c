@@ -213,7 +213,7 @@ ssize_t bpc_fileZIO_read(bpc_fileZIO_fd *fd, uchar *buf, size_t nRead)
 
             if ( fd->first && fd->strm.avail_in > 0 ) {
                 /*
-                 * we are at the very start of a new zlib block (or it could be chached checksums)
+                 * we are at the very start of a new zlib block (or it could be cached checksums)
                  */
                 fd->first = 0;
                 if ( fd->strm.next_in[0] == 0xd6 || fd->strm.next_in[0] == 0xd7 ) {

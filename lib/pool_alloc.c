@@ -13,7 +13,7 @@ struct alloc_pool
 
 	/* statistical data */
 	unsigned long		e_created;	/* extents created	*/
-	unsigned long		e_freed;	/* extents detroyed	*/
+	unsigned long		e_freed;	/* extents destroyed	*/
 	int64			n_allocated;	/* calls to alloc	*/
 	int64			n_freed;	/* calls to free	*/
 	int64			b_allocated;	/* cum. bytes allocated	*/

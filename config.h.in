@@ -531,7 +531,7 @@
 /* Define as const if the declaration of iconv() needs const. */
 #undef ICONV_CONST
 
-/* Define if you want the --iconv option. Specifing a value will set the
+/* Define if you want the --iconv option. Specifying a value will set the
    default iconv setting (a NULL means no --iconv processing by default). */
 #undef ICONV_OPTION
 

@@ -405,7 +405,7 @@ uint32 bpc_poolRefDeltaFileFlush(bpc_deltaCount_info *info)
     int errorCnt = 0;
     int fd;
 
-    if ( !info ) info = &DeltaInfoOld;         /* backward compatability */
+    if ( !info ) info = &DeltaInfoOld;         /* backward compatibility */
     if ( !info->refCnt[0].initDone ) return 1;
     for ( compress = 0 ; compress < 2 ; compress++ ) {
         uint entryCnt = bpc_hashtable_entryCount(&info->refCnt[compress].ht);
@@ -459,7 +459,7 @@ void bpc_poolRefDeltaUpdate(bpc_deltaCount_info *info, int compress, bpc_digest 
 {
     DigestInfo *digestInfo;
 
-    if ( !info ) info = &DeltaInfoOld;         /* backward compatability */
+    if ( !info ) info = &DeltaInfoOld;         /* backward compatibility */
     if ( !digest || digest->len == 0 ) return;
     if ( !info->refCnt[0].initDone ) return;
 
@@ -485,7 +485,7 @@ void bpc_poolRefDeltaUpdate(bpc_deltaCount_info *info, int compress, bpc_digest 
 
 void bpc_poolRefDeltaPrint(bpc_deltaCount_info *info)
 {
-    if ( !info ) info = &DeltaInfoOld;         /* backward compatability */
+    if ( !info ) info = &DeltaInfoOld;         /* backward compatibility */
     if ( !info->refCnt[0].initDone ) return;
     fprintf(stderr, "Uncompressed HT:\n");
     bpc_hashtable_iterate(&info->refCnt[0].ht, (void*)bpc_poolRefPrintEntry, NULL);
