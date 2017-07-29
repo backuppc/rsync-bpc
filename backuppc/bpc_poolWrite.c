@@ -837,7 +837,7 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
             /*
              * The hardlink failed.  This could be due to hitting the hardlink
              * limit, or the fact that fileName and poolPath are on different
-             * file systems, or the fileName didn't get writing.
+             * file systems, or the fileName didn't get written.
              * Just copy the file instead (assuming fileName got written).
              */
             bpc_poolWrite_copyToPool(info, poolPath, fileName);
