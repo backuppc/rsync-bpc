@@ -396,6 +396,7 @@ void bpc_attrib_dirDestroy(bpc_attrib_dir *dir)
 typedef struct {
     bpc_deltaCount_info *deltaInfo;
     int incr;
+    unsigned int *inodeMax;
 } fileRefCnt_info;
 
 static void bpc_attrib_fileRefCount(bpc_attrib_file *file, fileRefCnt_info *info)
@@ -406,18 +407,22 @@ static void bpc_attrib_fileRefCount(bpc_attrib_file *file, fileRefCnt_info *info
         if ( BPC_LogLevel >= 7 ) bpc_logMsgf("bpc_attrib_fileRefCount: file %s digest %s delta %d\n", file->name, hexStr, info->incr);
         bpc_poolRefDeltaUpdate(info->deltaInfo, file->compress, &file->digest, info->incr);
     }
+    if ( info->inodeMax && file->inode > *info->inodeMax ) {
+        *info->inodeMax = file->inode;
+    }
 }
 
 /*
  * call refDeltaUpdate with incr (typically +/-1) for every entry in the directory,
  * as well as the dir itself.
  */
-void bpc_attrib_dirRefCount(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, int incr)
+void bpc_attrib_dirRefCountInodeMax(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, int incr, unsigned int *inodeMax)
 {
     fileRefCnt_info info;
 
     info.deltaInfo = deltaInfo;
     info.incr      = incr;
+    info.inodeMax  = inodeMax;
     bpc_hashtable_iterate(&dir->filesHT, (void*)bpc_attrib_fileRefCount, &info);
     if ( dir->digest.len > 0 ) {
         char hexStr[BPC_DIGEST_LEN_MAX * 2 + 1];
@@ -427,6 +432,15 @@ void bpc_attrib_dirRefCount(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir,
     } else {
         if ( BPC_LogLevel >= 7 ) bpc_logMsgf("bpc_attrib_dirRefCount: no attrib digest -> no delta\n");
     }
+}
+
+/*
+ * call refDeltaUpdate with incr (typically +/-1) for every entry in the directory,
+ * as well as the dir itself.
+ */
+void bpc_attrib_dirRefCount(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, int incr)
+{
+    bpc_attrib_dirRefCountInodeMax(deltaInfo, dir, incr, NULL);
 }
 
 typedef struct {
