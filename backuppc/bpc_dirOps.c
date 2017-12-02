@@ -164,7 +164,7 @@ int bpc_path_remove(bpc_deltaCount_info *deltaInfo, char *path, int compress)
  * Reference count all the files below the directory path, based on the attrib
  * files in and below path.
  */
-int bpc_path_refCountAll(bpc_deltaCount_info *deltaInfo, char *path, int compress, int incr)
+int bpc_path_refCountAllInodeMax(bpc_deltaCount_info *deltaInfo, char *path, int compress, int incr, unsigned int *inodeMax)
 {
     char filePath[BPC_MAXPATHLEN];
     STRUCT_STAT st;
@@ -217,7 +217,7 @@ int bpc_path_refCountAll(bpc_deltaCount_info *deltaInfo, char *path, int compres
                     errorCnt++;
                 } else {
                     if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_path_refCountAll: adjusting ref counts from attrib file %s\n", filePath);
-                    bpc_attrib_dirRefCount(deltaInfo, &dir, incr);
+                    bpc_attrib_dirRefCountInodeMax(deltaInfo, &dir, incr, inodeMax);
                 }
                 bpc_attrib_dirDestroy(&dir);
             }
@@ -230,11 +230,20 @@ int bpc_path_refCountAll(bpc_deltaCount_info *deltaInfo, char *path, int compres
     if ( dirList ) {
         for ( dirListP = dirList ; dirListP < dirList + dirListLen ; dirListP += strlen(dirListP) + 1 ) {
             snprintf(filePath, sizeof(filePath), "%s/%s", path, dirListP);
-            errorCnt += bpc_path_refCountAll(deltaInfo, filePath, compress, incr);
+            errorCnt += bpc_path_refCountAllInodeMax(deltaInfo, filePath, compress, incr, inodeMax);
         }
         free(dirList);
     }
     return errorCnt;
+}
+
+/*
+ * Reference count all the files below the directory path, based on the attrib
+ * files in and below path.
+ */
+int bpc_path_refCountAll(bpc_deltaCount_info *deltaInfo, char *path, int compress, int incr)
+{
+    return bpc_path_refCountAllInodeMax(deltaInfo, path, compress, incr, NULL);
 }
 
 /*
