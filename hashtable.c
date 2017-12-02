@@ -151,3 +151,27 @@ void *hashtable_find(struct hashtable *tbl, int64 key, int allocate_if_missing)
 	tbl->entries++;
 	return node;
 }
+
+/*
+ * Iterate over all the entries in the hash table, calling a callback for each valid entry
+ *
+ * Note: this function won't work if the callback adds new entries to the hash table while
+ * iterating over the entries.  You can update or delete entries, but adding an entry might
+ * cause the hash table size to be bumped, which breaks the indexing.  So don't add new
+ * entries while iterating over the table.
+ */
+void hashtable_iterate(struct hashtable *tbl, void (*callback)(int64 key, void*, void*), void *arg1)
+{
+    int32 ndx;
+    int key64 = tbl->key64, nkey;
+    struct ht_int32_node *node;
+
+    for ( ndx = 0 ; ndx < tbl->size ; ndx++ ) {
+	node = HT_NODE(tbl, tbl->nodes, ndx);
+	nkey = HT_KEY(node, key64);
+
+	if ( nkey == 0 ) continue;
+
+        (*callback)(nkey, (void*)node, arg1);
+    }
+}
