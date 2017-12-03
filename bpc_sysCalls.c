@@ -153,6 +153,7 @@ int bpc_sysCall_cleanup(void)
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_sysCall_cleanup: doneInit = %d\n", DoneInit);
     if ( !DoneInit ) return 0;
     if ( am_generator ) {
+        hard_link_bpc_update_link_count();
         bpc_attribCache_flush(&acNew, 1, NULL);
         if ( acOldUsed ) bpc_attribCache_flush(&acOld, 1, NULL);
     }
@@ -1277,6 +1278,32 @@ int bpc_link(const char *targetName, const char *linkName)
         bpc_attribCache_setFile(&acOld, (char*)linkName, file, 0);
     }
     fprintf(stderr, "IOdone: new %s => %s\n", linkName, targetName);
+    return 0;
+}
+
+/*
+ * check and set the number of links on a file
+ */
+int bpc_nlinkSet(const char *targetName, uint32 nlinks)
+{
+    bpc_attrib_file *file;
+
+    /*
+     * check if the target exists.
+     */
+    if ( !(file = bpc_attribCache_getFile(&acNew, (char*)targetName, 0, 0)) ) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    if ( file->nlinks == nlinks ) {
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_nlinkSet(%s, %u) -> no change\n", targetName, nlinks);
+        return 0;
+    }
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_nlinkSet(%s, %u) -> was %u\n", targetName, nlinks, file->nlinks);
+
+    file->nlinks = nlinks;;
+    bpc_attribCache_setFile(&acNew, (char*)targetName, file, 0);
     return 0;
 }
 

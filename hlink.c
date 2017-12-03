@@ -50,7 +50,7 @@ extern struct file_list *cur_flist;
 
 static struct hashtable *dev_tbl;
 
-static struct hashtable *prior_hlinks;
+static struct hashtable *prior_hlinks, *hlink_nlinks;
 
 static struct file_list *hlink_flist;
 
@@ -58,8 +58,10 @@ void init_hard_links(void)
 {
 	if (am_sender || protocol_version < 30)
 		dev_tbl = hashtable_create(16, 1);
-	else if (inc_recurse)
+	else if (inc_recurse) {
 		prior_hlinks = hashtable_create(1024, 0);
+		hlink_nlinks = hashtable_create(1024, 0);
+        }
 }
 
 struct ht_int64_node *idev_find(int64 dev, int64 ino)
@@ -120,6 +122,13 @@ static void match_gnums(int32 *ndx_list, int ndx_count)
 
 	qsort(ndx_list, ndx_count, sizeof ndx_list[0],
 	     (int (*)()) hlink_compare_gnum);
+
+	for (from = 0; from < ndx_count; from++) {
+            file = hlink_flist->sorted[ndx_list[from]];
+            gnum = F_HL_GNUM(file);
+            /* bpc_logMsgf("match_gnums: sort[%d]: gnum = %ld, fileName = %s\n", from, gnum, file->basename); */
+            if ( (node = hashtable_find(hlink_nlinks, gnum, 1)) ) node->data++;
+        }
 
 	for (from = 0; from < ndx_count; from++) {
 		file = hlink_flist->sorted[ndx_list[from]];
@@ -216,9 +225,19 @@ static int maybe_hard_link(struct file_struct *file, int ndx,
 			   const char *oldname, STRUCT_STAT *old_stp,
 			   const char *realname, int itemizing, enum logcode code)
 {
+        /* bpc_logMsgf("maybe_hard_link: fname = %s, oldname = %s, statret = %d\n", fname, oldname, statret); */
 	if (statret == 0) {
+                /*
+                    bpc_logMsgf("maybe_hard_link: new ino = %ld, old = %ld; nlink = %u,%u, size = %u,%u\n",
+                                    sxp->st.st_ino, old_stp->st_ino,
+                                    sxp->st.st_nlink, old_stp->st_nlink,
+                                    sxp->st.st_size, old_stp->st_size
+                        );
+                */
 		if (sxp->st.st_dev == old_stp->st_dev
-		 && sxp->st.st_ino == old_stp->st_ino) {
+		 && sxp->st.st_ino == old_stp->st_ino
+                 && sxp->st.st_nlink == old_stp->st_nlink
+                 && sxp->st.st_size == old_stp->st_size) {
 			if (itemizing) {
 				itemize(fname, file, ndx, statret, sxp,
 					ITEM_LOCAL_CHANGE | ITEM_XNAME_FOLLOWS,
@@ -228,6 +247,7 @@ static int maybe_hard_link(struct file_struct *file, int ndx,
 				rprintf(FCLIENT, "%s is uptodate\n", fname);
 			file->flags |= FLAG_HLINK_DONE;
                         bpc_sysCall_statusFileSize(F_LENGTH(file));
+                        fprintf(stderr, "IOdone: same %s\n", fname);
 			return 0;
 		}
 	}
@@ -570,4 +590,33 @@ int skip_hard_link(struct file_struct *file, struct file_list **flist_p)
 
 	return prev_ndx;
 }
+
+static void hard_link_bpc_update_one_link_count(int64 gnum, struct ht_int32_node *node, UNUSED(void *arg))
+{
+    struct ht_int32_node *count;
+
+    if (!node->data || CVAL(node->data, 0) == 0) {
+        return;
+    }
+    count = hashtable_find(hlink_nlinks, gnum, 0);
+    /*
+        bpc_logMsgf("hard_link_bpc_update_one_link_count: gnum = %u has file = %s, count = %u\n",
+                        gnum, (char*)node->data, count ? (uint32)count->data : 0);
+    */
+    if ( count->data - (void*)NULL > 1 ) {
+        bpc_nlinkSet((char*)node->data, count->data - (void*)NULL);
+    }
+}
+
+/*
+ * For all the hardlinks we transferred, check the BackupPC attribute link count (nlink) and update it
+ * if it isn't correct.
+ */
+void hard_link_bpc_update_link_count(void)
+{
+    if ( inc_recurse ) {
+        hashtable_iterate(prior_hlinks, (void*)hard_link_bpc_update_one_link_count, NULL);
+    }
+}
+
 #endif
