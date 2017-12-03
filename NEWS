@@ -1,5 +1,12 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.9 released 3 Dec 2017:
+
+    - during cleanup, generator now checks the backuppc inode hardlink counts to make sure they match
+      the number of identical hardlinks transferred.
+
+    - updated backuppc library to capture changes in backup-xs (no effect on rsync-bpc).
+
 3.0.9.8 released 11 Jun 2017:
 
     - fixed version number in configure.ac and configure.sh, which was incorrectly left at 3.0.9.6
