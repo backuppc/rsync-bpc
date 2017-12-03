@@ -52,6 +52,7 @@ int bpc_stat(const char *fileName, struct stat *buf);
 int bpc_file_checksum(char *fileName, char *sum, int checksum_len);
 int bpc_symlink(const char *fileName, const char *symName);
 int bpc_link(const char *targetName, const char *linkName);
+int bpc_nlinkSet(const char *targetName, uint32 nlinks);
 int bpc_lutimes(const char *fileName, struct timeval *t);
 int bpc_utimes(const char *fileName, struct timeval *t);
 int bpc_lutime(const char *fileName, time_t mtime);
@@ -168,6 +169,7 @@ void generate_files(int f_out, const char *local_name);
 struct hashtable *hashtable_create(int size, int key64);
 void hashtable_destroy(struct hashtable *tbl);
 void *hashtable_find(struct hashtable *tbl, int64 key, int allocate_if_missing);
+void hashtable_iterate(struct hashtable *tbl, void (*callback)(int64 key, void*, void*), void *arg1);
 void init_hard_links(void);
 struct ht_int64_node *idev_find(int64 dev, int64 ino);
 void idev_destroy(void);
@@ -181,6 +183,7 @@ void finish_hard_link(struct file_struct *file, const char *fname, int fin_ndx,
 		      STRUCT_STAT *stp, int itemizing, enum logcode code,
 		      int alt_dest);
 int skip_hard_link(struct file_struct *file, struct file_list **flist_p);
+void hard_link_bpc_update_link_count(void);
 void io_set_sock_fds(int f_in, int f_out);
 void set_io_timeout(int secs);
 void set_msg_fd_in(int fd);
