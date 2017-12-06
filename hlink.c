@@ -614,7 +614,7 @@ static void hard_link_bpc_update_one_link_count(int64 gnum, struct ht_int32_node
  */
 void hard_link_bpc_update_link_count(void)
 {
-    if ( inc_recurse ) {
+    if ( inc_recurse && prior_hlinks ) {
         hashtable_iterate(prior_hlinks, (void*)hard_link_bpc_update_one_link_count, NULL);
     }
 }
