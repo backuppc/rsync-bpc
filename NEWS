@@ -1,5 +1,9 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.10 released 5 Dec 2017:
+
+    - only call hard_link_bpc_update_link_count() if preserve_hard_links; patch from @ovidiustanila.
+
 3.0.9.9 released 3 Dec 2017:
 
     - during cleanup, generator now checks the backuppc inode hardlink counts to make sure they match
