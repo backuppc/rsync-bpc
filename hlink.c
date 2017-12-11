@@ -117,11 +117,13 @@ static void match_gnums(int32 *ndx_list, int ndx_count)
 	qsort(ndx_list, ndx_count, sizeof ndx_list[0],
 	     (int (*)()) hlink_compare_gnum);
 
-	for (from = 0; from < ndx_count; from++) {
-            file = hlink_flist->sorted[ndx_list[from]];
-            gnum = F_HL_GNUM(file);
-            /* bpc_logMsgf("match_gnums: sort[%d]: gnum = %ld, fileName = %s\n", from, gnum, file->basename); */
-            if ( (node = hashtable_find(hlink_nlinks, gnum, 1)) ) node->data++;
+        if ( inc_recurse && prior_hlinks && hlink_nlinks ) {
+            for (from = 0; from < ndx_count; from++) {
+                file = hlink_flist->sorted[ndx_list[from]];
+                gnum = F_HL_GNUM(file);
+                /* bpc_logMsgf("match_gnums: sort[%d]: gnum = %ld, fileName = %s\n", from, gnum, file->basename); */
+                if ( (node = hashtable_find(hlink_nlinks, gnum, 1)) ) node->data++;
+            }
         }
 
 	for (from = 0; from < ndx_count; from++) {
@@ -622,7 +624,7 @@ static void hard_link_bpc_update_one_link_count(int64 gnum, struct ht_int32_node
  */
 void hard_link_bpc_update_link_count(void)
 {
-    if ( inc_recurse && prior_hlinks ) {
+    if ( inc_recurse && prior_hlinks && hlink_nlinks ) {
         hashtable_iterate(prior_hlinks, (void*)hard_link_bpc_update_one_link_count, NULL);
     }
 }
