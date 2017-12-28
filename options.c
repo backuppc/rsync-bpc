@@ -2269,11 +2269,10 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			bwlimit_writemax = 512;
 	}
 
-	if (sparse_files && inplace) {
-		/* Note: we don't check for this below, because --append is
-		 * OK with --sparse (as long as redos are handled right). */
+	if (sparse_files ) {
+		/* sparse files are not supported by BackupPC */
 		snprintf(err_buf, sizeof err_buf,
-			 "--sparse cannot be used with --inplace\n");
+			 "--sparse is not supported by rsync_bpc and BackupPC\n");
 		return 0;
 	}
 
