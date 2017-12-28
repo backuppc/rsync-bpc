@@ -959,12 +959,12 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 		file->flags |= FLAG_HLINKED;
 #endif
 	file->modtime = (time_t)modtime;
-#ifdef HAVE_UTIMENSAT
 	if (modtime_nsec) {
+#ifdef HAVE_UTIMENSAT
 		file->flags |= FLAG_MOD_NSEC;
 		OPT_EXTRA(file, 0)->unum = modtime_nsec;
-	}
 #endif
+	}
 	file->len32 = (uint32)file_length;
 #if SIZEOF_INT64 >= 8
 	if (file_length > 0xFFFFFFFFu && S_ISREG(mode)) {

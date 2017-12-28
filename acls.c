@@ -112,6 +112,7 @@ static const char *str_acl_type(SMB_ACL_TYPE_T type)
 	return "unknown ACL type!";
 }
 
+#if 0
 static int calc_sacl_entries(const rsync_acl *racl)
 {
 	/* A System ACL always gets user/group/other permission entries. */
@@ -132,6 +133,7 @@ static int rsync_acl_get_perms(const rsync_acl *racl)
 	     + ((racl->mask_obj != NO_ENTRY ? racl->mask_obj : racl->group_obj) << 3)
 	     + racl->other_obj;
 }
+#endif
 
 /* Removes the permission-bit entries from the ACL because these
  * can be reconstructed from the file's mode. */
@@ -253,6 +255,7 @@ void free_acl(stat_x *sxp)
 	}
 }
 
+#if 0
 #ifdef SMB_ACL_NEED_SORT
 static int id_access_sorter(const void *r1, const void *r2)
 {
@@ -264,9 +267,11 @@ static int id_access_sorter(const void *r1, const void *r2)
 	return rid1 == rid2 ? 0 : rid1 < rid2 ? -1 : 1;
 }
 #endif
+#endif
 
 /* === System ACLs === */
 
+#if 0
 /* Unpack system ACL -> rsync ACL verbatim.  Return whether we succeeded. */
 static BOOL unpack_smb_acl(SMB_ACL_T sacl, rsync_acl *racl)
 {
@@ -357,6 +362,7 @@ static BOOL unpack_smb_acl(SMB_ACL_T sacl, rsync_acl *racl)
 
 	return True;
 }
+#endif
 
 /* Synactic sugar for system calls */
 
@@ -371,6 +377,7 @@ static BOOL unpack_smb_acl(SMB_ACL_T sacl, rsync_acl *racl)
 #define COE(func,args) CALL_OR_ERROR(func,args,#func)
 #define COE2(func,args) CALL_OR_ERROR(func,args,NULL)
 
+#if 0
 #ifndef HAVE_OSX_ACLS
 /* Store the permissions in the system ACL entry. */
 static int store_access_in_entry(uint32 access, SMB_ACL_ENTRY_T entry)
@@ -456,6 +463,7 @@ static BOOL pack_smb_acl(SMB_ACL_T *smb_acl, const rsync_acl *racl)
 	sys_acl_free_acl(*smb_acl);
 	return False;
 }
+#endif
 
 static int find_matching_rsync_acl(const rsync_acl *racl, SMB_ACL_TYPE_T type,
 				   const item_list *racl_list)
@@ -862,7 +870,7 @@ void uncache_tmp_acls(void)
 	}
 }
 
-#ifndef HAVE_OSX_ACLS
+#if 0
 static mode_t change_sacl_perms(SMB_ACL_T sacl, rsync_acl *racl, mode_t old_mode, mode_t mode)
 {
 	SMB_ACL_ENTRY_T entry;

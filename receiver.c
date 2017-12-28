@@ -606,7 +606,6 @@ int recv_files(int f_in, int f_out, char *local_name)
 	char fnamecmpbuf[MAXPATHLEN];
 	uchar fnamecmp_type;
 	struct file_struct *file;
-        struct stats initial_stats;
 	int itemizing = am_server ? logfile_format_has_i : stdout_format_has_i;
 	enum logcode log_code = log_before_transfer ? FLOG : FINFO;
 	int max_phase = protocol_version >= 29 ? 2 : 1;
@@ -836,8 +835,6 @@ int recv_files(int f_in, int f_out, char *local_name)
 			else
 				fnamecmp = fname;
 		}
-
-                initial_stats = stats;
 
                 /*
                  * Opening/reading/writing files in BackupPC is quite expensive, given the
