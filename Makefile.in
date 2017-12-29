@@ -54,7 +54,7 @@ TLS_OBJ = tls.o syscall.o lib/compat.o lib/snprintf.o lib/permstring.o lib/sysxa
 CHECK_PROGS = rsync_bpc$(EXEEXT) tls$(EXEEXT) getgroups$(EXEEXT) getfsdev$(EXEEXT) \
 	testrun$(EXEEXT) trimslash$(EXEEXT) t_unsafe$(EXEEXT) wildtest$(EXEEXT)
 
-CHECK_SYMLINKS = testsuite/chown-fake.test testsuite/devices-fake.test testsuite/xattrs-hlink.test
+CHECK_SYMLINKS = 
 
 # Objects for CHECK_PROGS to clean
 CHECK_OBJS=tls.o testrun.o getgroups.o getfsdev.o t_stub.o t_unsafe.o trimslash.o wildtest.o
@@ -65,7 +65,7 @@ CHECK_OBJS=tls.o testrun.o getgroups.o getfsdev.o t_stub.o t_unsafe.o trimslash.
 	$(CC) -I. -I$(srcdir) $(CFLAGS) $(CPPFLAGS) -c $< @CC_SHOBJ_FLAG@
 @OBJ_RESTORE@
 
-all: Makefile rsync_bpc$(EXEEXT) @MAKE_MAN@
+all: Makefile rsync_bpc$(EXEEXT)
 
 install: all
 	-${MKDIR_P} ${DESTDIR}${bindir}
@@ -197,49 +197,9 @@ finddead:
 	nm *.o */*.o |grep 'T ' | awk '{print $$3}' | sort -u > nmfns.txt
 	comm -13 nmused.txt nmfns.txt
 
-# 'check' is the GNU name, 'test' is the name for everybody else :-)
-.PHONY: check test
-
-test: check
-
-# There seems to be no standard way to specify some variables as
-# exported from a Makefile apart from listing them like this.
-
-# This depends on building rsync; if we need any helper programs it
-# should depend on them too.
-
-# We try to run the scripts with POSIX mode on, in the hope that will
-# catch Bash-isms earlier even if we're running on GNU.  Of course, we
-# might lose in the future where POSIX diverges from old sh.
-
-check: all $(CHECK_PROGS) $(CHECK_SYMLINKS)
-	rsync_bin=`pwd`/rsync$(EXEEXT) $(srcdir)/runtests.sh
-
-check29: all $(CHECK_PROGS) $(CHECK_SYMLINKS)
-	rsync_bin=`pwd`/rsync$(EXEEXT) $(srcdir)/runtests.sh --protocol=29
-
-check30: all $(CHECK_PROGS) $(CHECK_SYMLINKS)
-	rsync_bin=`pwd`/rsync$(EXEEXT) $(srcdir)/runtests.sh --protocol=30
-
 wildtest.o: wildtest.c lib/wildmatch.c rsync.h config.h
 wildtest$(EXEEXT): wildtest.o lib/compat.o lib/snprintf.o @BUILD_POPT@
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ wildtest.o lib/compat.o lib/snprintf.o @BUILD_POPT@ $(LIBS)
-
-testsuite/chown-fake.test:
-	ln -s chown.test $(srcdir)/testsuite/chown-fake.test
-
-testsuite/devices-fake.test:
-	ln -s devices.test $(srcdir)/testsuite/devices-fake.test
-
-testsuite/xattrs-hlink.test:
-	ln -s xattrs.test $(srcdir)/testsuite/xattrs-hlink.test
-
-# This does *not* depend on building or installing: you can use it to
-# check a version installed from a binary or some other source tree,
-# if you want.
-
-installcheck: $(CHECK_PROGS) $(CHECK_SYMLINKS)
-	POSIXLY_CORRECT=1 TOOLDIR=`pwd` rsync_bin="$(bindir)/rsync$(EXEEXT)" srcdir="$(srcdir)" $(srcdir)/runtests.sh
 
 # TODO: Add 'dist' target; need to know which files will be included
 
