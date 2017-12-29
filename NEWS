@@ -1,3 +1,11 @@
+NEWS for rsync 3.1.2.beta0 (28 Dec 2017)
+
+    - Initial beta version based on rsync 3.1.2
+
+3.0.9.0 released 24 June 2013:
+
+    - Initial version based on rsync 3.0.9, plus rsync-patches-3.0.9.tar.gz (23-Sep-2011 10:46).
+
 NEWS for rsync 3.1.2 (21 Dec 2015)
 Protocol: 31 (unchanged)
 Changes since 3.1.1:
