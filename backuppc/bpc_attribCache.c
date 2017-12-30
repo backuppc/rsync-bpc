@@ -93,8 +93,8 @@ void bpc_attribCache_setCurrentDirectory(bpc_attribCache_info *ac, char *dir)
  * Given a backup path, split it into the directory, file name, and path to the directory (starting
  * with the share name, ie: relative to ac->backupTopDir).
  *
- * splitPath will strip trailing "/." or "/" before splitting the path, but isn't capable of handling
- * paths with "/." in the middle, or ".." anywhere.
+ * splitPath will strip initial "./" and trailing "/." or "/" before splitting the path, but isn't
+ * capable of handling paths with "/." in the middle, or ".." anywhere.
  */
 static void splitPath(bpc_attribCache_info *ac, char *dir, char *fileName, char *attribPath, char *path)
 {
@@ -103,14 +103,24 @@ static void splitPath(bpc_attribCache_info *ac, char *dir, char *fileName, char 
     size_t pathLen;
 
     /*
+     * remove initial "./"
+     */
+    while ( path[0] == '.' && path[1] == '/' ) {
+        path += 2;
+        while ( path[0] == '/' ) path++;
+    }
+
+    /*
      * if this is a relative path, prepend ac->currentDir (provided ac->currentDir is set)
      */
     if ( path[0] != '/' && ac->currentDir[0] ) {
-        while ( path[0] == '.' && path[1] == '/' ) path += 2;
-        while ( path[0] == '/' ) path++;
         snprintf(fullPath, BPC_MAXPATHLEN, "%s/%s", ac->currentDir, path);
         path = fullPath;
     }
+
+    /*
+     * strip trailing "/." or "/" 
+     */
     pathLen = strlen(path);
     while ( (pathLen > 1 && path[pathLen - 2] == '/' && path[pathLen - 1] == '.')
          || (pathLen > 0 && path[pathLen - 1] == '/') ) {
