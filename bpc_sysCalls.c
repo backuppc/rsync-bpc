@@ -438,21 +438,24 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
             }
         }
         fd->fileSize = bpc_fileZIO_read(&fdz, (uchar*)fd->buffer, fd->bufferSize);
-        if ( fd->fileSize == (off_t)fd->bufferSize ) {
+        if ( fd->fileSize >= (off_t)fd->bufferSize ) {
             off_t nRead;
             /*
              * buffer is full - write to flat disk and then copy the rest of the file
              */
-            fd->posn = fd->bufferSize;
+            fd->posn = fd->fileSize;
             if ( bpc_fileSwitchToDisk(ac, fd) ) {
                 bpc_fileDescFree(fd);
                 return NULL;
             }
             while ( (nRead = bpc_fileZIO_read(&fdz, (uchar*)fd->buffer, fd->bufferSize)) > 0 ) {
                 if ( bpc_fileWriteBuffer(fd->tmpFd, fd->buffer, nRead) ) {
+                    bpc_logErrf("bpc_fileOpen: bpc_fileWriteBuffer(%d, ..., %lu) failed\n",
+                                        fd->tmpFd, nRead);
                     bpc_fileDescFree(fd);
                     return NULL;
                 }
+                fd->fileSize += nRead;
             }
         }
         bpc_fileZIO_close(&fdz);
@@ -1732,11 +1735,17 @@ ssize_t bpc_read(int fdNum, void *buf, size_t readSize)
     }
     fd = &Fd[fdNum];
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_read(%d (%s), buf, %lu)\n",
-                                    fdNum, fd->fileName, readSize);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_read(%d (%s), buf, %lu) tmpFd = %d\n",
+                                    fdNum, fd->fileName, readSize, fd->tmpFd);
 
     if ( fd->tmpFd < 0 ) {
+        if ( fd->posn >= fd->fileSize || (size_t)fd->posn >= fd->bufferSize ) {
+            bpc_logMsgf("bpc_read: read past EOF; readSize = %lu, posn = %lu, fileSize = %lu, bufferSize = %lu\n",
+                                                 readSize, fd->posn, fd->fileSize, fd->bufferSize);
+             return 0;
+        }
         if ( readSize > (size_t)fd->fileSize - fd->posn ) readSize = fd->fileSize - fd->posn;
+	if ( readSize > (size_t)fd->bufferSize - fd->posn ) readSize = fd->bufferSize - fd->posn;
         memcpy(buf, fd->buffer + fd->posn, readSize);
         fd->posn += readSize;
         return readSize;
