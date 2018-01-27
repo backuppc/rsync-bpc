@@ -1,5 +1,10 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.12 released 27 Jan 2018:
+
+   - in bpc_read() ensure we don't read past the end of the buffer, in case actual file's
+     size is less than the attribute file size.
+
 3.0.9.11 released 13 Dec 2017:
 
     - ensure hlink_nlinks is non-NULL before using it.
