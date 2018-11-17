@@ -251,7 +251,17 @@ ssize_t bpc_fileZIO_read(bpc_fileZIO_fd *fd, uchar *buf, size_t nRead)
                 inflateReset(&fd->strm);
                 fd->first = 1;
             }
-            if ( status < 0 ) return status;
+            if ( status < 0 ) {
+                /*
+                 * return error immediately if there are no bytes to return
+                 */
+                if ( totalRead <= 0 ) return status;
+                /*
+                 * save error return for next call and return remaining buffer
+                 */
+                fd->error = status;
+                return totalRead;
+            }
         }
     }
     return totalRead;
