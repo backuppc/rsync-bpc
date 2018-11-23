@@ -1915,7 +1915,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			rsyserr(FERROR_XFER, errno, "open %s", full_fname(backupptr));
 			unmake_file(back_file);
 			back_file = NULL;
-			close(fd);
+			bpc_close(fd);
 			goto cleanup;
 		}
 		fnamecmp_type = FNAMECMP_BACKUP;

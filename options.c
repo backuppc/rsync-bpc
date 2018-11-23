@@ -831,6 +831,7 @@ void usage(enum logcode F)
   rprintf(F,"     --bpc-bkup-prevcomp=NUM compression level for previous backup\n");
   rprintf(F,"     --bpc-bkup-merge=N/C/V,...  list of backups to merge, with number/compress/version for each\n");
   rprintf(F,"     --bpc-bkup-inode0=NUM   starting inode number for new backup\n");
+  rprintf(F,"     --bpc-attrib-new        use new-style attribute files\n");
   rprintf(F,"     --bpc-log-level=NUM     log level\n");
 
   rprintf(F,"\n");

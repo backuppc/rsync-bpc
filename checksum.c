@@ -125,7 +125,7 @@ int file_checksum(const char *fname, const STRUCT_STAT *st_p, char *sum)
             if ( !bpc_file_checksum((char *)fname, sum, MD5_DIGEST_LEN) ) return 0;
             /*
              * if bpc_file_checksum() fails on an empty file it likely means we have a wrong
-             * digest, so don't recompute; this will cause the file to get re-transfered and
+             * digest, so don't recompute; this will cause the file to get re-transferred and
              * the digest will be updated.
              */
             if ( len == 0 ) return -1;

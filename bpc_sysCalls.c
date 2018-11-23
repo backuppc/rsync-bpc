@@ -1785,7 +1785,8 @@ int bpc_access(const char *fileName, int mode)
 {
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0);
 
-    bpc_logMsgf("bpc_access(%s, %d) -> %d\n", fileName, mode, file ? 0 : -1);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_access(%s, %d) -> %d\n",
+                                      fileName, mode, file ? 0 : -1);
     if ( !file ) {
         errno = ENOENT;
         return -1;
