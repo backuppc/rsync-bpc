@@ -1,5 +1,9 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.13 released 23 Nov 2018:
+
+   - on inflate error, first return any remaining bytes before returning an error.
+
 3.0.9.12 released 27 Jan 2018:
 
    - in bpc_read() ensure we don't read past the end of the buffer, in case actual file's
