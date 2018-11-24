@@ -1094,7 +1094,7 @@ static int bpc_attrib_dirWriteOld(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir
     char *p;
 
     bpc_attrib_attribFilePath(attribPath, dirPath, attribFileName);
-    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_dirWrite(%s)\n", attribPath);
+    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_dirWriteOld(%s)\n", attribPath);
     snprintf(attribPathTemp, BPC_MAXPATHLEN, "%s.%d", attribPath, getpid());
     if ( (p = strrchr(attribPathTemp, '/')) ) {
         *p = '\0';
@@ -1117,6 +1117,7 @@ static int bpc_attrib_dirWriteOld(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir
             return -1;
         }
         if ( oldDigest ) bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, oldDigest, -1);
+	dir->digest.len = 0;
         return 0;
     }
 
@@ -1159,6 +1160,11 @@ static int bpc_attrib_dirWriteOld(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir
 
     if ( oldDigest ) bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, oldDigest, -1);
     bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, &digest, 1);
+
+    /*
+     * update with the new digest
+     */
+    memcpy(&dir->digest, &digest, sizeof(digest));
 
     return 0;
 }
@@ -1296,5 +1302,11 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
             closedir(dirOs);
         }
     }
+
+    /*
+     * update with the new digest
+     */
+    memcpy(&dir->digest, &digest, sizeof(digest));
+
     return 0;
 }
