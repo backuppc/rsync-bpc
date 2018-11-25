@@ -1,8 +1,10 @@
 NEWS for rsync-bpc-3.0.9.
 
-3.0.9.13 released 23 Nov 2018:
+3.0.9.13 released 25 Nov 2018:
 
    - on inflate error, first return any remaining bytes before returning an error.
+
+   - bpc_attrib_dirWrite() updates dir->digest with new digest.
 
 3.0.9.12 released 27 Jan 2018:
 
