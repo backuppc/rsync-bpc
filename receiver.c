@@ -209,7 +209,7 @@ int open_tmpfile(char *fnametmp, const char *fname, struct file_struct *file)
 	 * (Thanks to snabb@epipe.fi for pointing this out.) */
 	fd = do_mkstemp(fnametmp, (file->mode|added_perms) & INITACCESSPERMS, (char*)fname);
 
-#if 0 /* was SUPPORT_ACLS */
+#if 0
 	/* In most cases parent directories will already exist because their
 	 * information should have been previously transferred, but that may
 	 * not be the case with -R */
