@@ -4,50 +4,50 @@ NEWS for rsync-bpc 3.1.2
 
 28 Dec 2017: initial beta version based on rsync 3.1.2 (not released)
 
-NEWS for rsync 3.1.2 (21 Dec 2015)
+NEWS for rsync 3.1.3 (28 Jan 2018)
 Protocol: 31 (unchanged)
-Changes since 3.1.1:
+Changes since 3.1.2:
 
   SECURITY FIXES:
-
-    - Make sure that all transferred files use only path names from inside the
-      transfer.  This makes it impossible for a malicious sender to try to make
-      the receiver use an unsafe destination path for a transferred file, such
-      as a just-sent symlink.
+    - Fixed a buffer overrun in the protocol's handling of xattr names and
+      ensure that the received name is null terminated.
+    - Fix an issue with --protect-args where the user could specify the arg in
+      the protected-arg list and short-circuit some of the arg-sanitizing code.
 
   BUG FIXES:
 
-    - Change the checksum seed order in the per-block checksums.  This prevents
-      someone from trying to create checksum blocks that match in sum but not
-      content.
-    - Fixed a with the per-dir filter files (using -FF) that could trigger an
-      assert failure.
-    - Only skip set_modtime() on a transferred file if the time is exactly
-      right.
-    - Don't create an empty backup dir for a transferred file that doesn't
-      exist yet.
-    - Fixed a bug where --link-dest and --xattrs could cause rsync to exit if
-      a filename had a matching dir of the same name in the alt-dest area.
-    - Allow more than 32 group IDs per user in the daemon's gid=LIST config.
-    - Fix the logging of %b & %c via --log-file (daemon logging was already
-      correct, as was --out-format='%b/%c').
-    - Fix erroneous acceptance of --info=5 & --debug=5 (an empty flag name is
-      not valid).
+    - Don't output about a new backup dir without appropriate info verbosity.
+    - Fixed some issues with the sort functions in support/rsyncstats script.
+    - Added a way to specify daemon config lists (e.g. users, groups, etc) that
+      contain spaces (see "auth users" in the latest rsyncd.conf manpage).
+    - If a backup fails (e.g. full disk) rsync exits with an error.
+    - Fixed a problem with a doubled --fuzzy option combined with --link-dest.
+    - Avoid invalid output in the summary if either the start or end time had
+      an error.
+    - We don't allow a popt alias to affect the --daemon or --server options.
+    - Fix daemon exclude code to disallow attribute changes in addition to
+      disallowing transfers.
+    - Don't force nanoseconds to match if a non-transferred, non-checksummed
+      file only passed the quick-check w/o comparing nanosecods.
 
   ENHANCEMENTS:
 
-    - Added "(DRY RUN)" info to the --debug=exit output line.
-    - Use usleep() for our msleep() function if it is available.
-    - Added a few extra long-option names to rrsync script, which will make
-      BackupPC happier.
-    - Made configure choose to use linux xattrs on netbsd (rather than not
-      supporting xattrs).
-    - Added -wo (write-only) option to rrsync support script.
-    - Misc. manpage tweaks.
+    - Added the ability for rsync to compare nanosecond times in its file-check
+      comparisons, and added support nanosecond times on Mac OS X.
+    - Added a short-option (-@) for --modify-window.
+    - Added the --checksum-choice=NAME[,NAME] option to choose the checksum
+      algorithms.
+    - Added hashing of xattr names (with using -X) to improve the handling of
+      files with large numbers of xattrs.
+    - Added a way to filter xattr names using include/exclude/filter rules (see
+      the --xattrs option in the manpage for details).
+    - Added "daemon chroot|uid|gid" to the daemon config (in addition to the
+      old chroot|uid|gid settings that affect the daemon's transfer process).
+    - Added "syslog tag" to the daemon configuration.
+    - Some manpage improvements.
 
   DEVELOPER RELATED:
 
-    - Fixed a bug with the Makefile's use of INSTALL_STRIP.
-    - Improve a test in the suite that could get an erroneous timestamp error.
-    - Tweaks for newer versions of git in the packaging tools.
-    - Improved the m4 generation rules and some autoconf idioms.
+    - Tweak the "make" output when yodl isn't around to create the man pages.
+    - Changed an obsolete autoconf compile macro.
+    - Support newer yodl versions when converting man pages.

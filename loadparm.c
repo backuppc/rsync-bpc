@@ -17,7 +17,7 @@
  * and Karl Auer.  Some of the changes are:
  *
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2015 Wayne Davison <wayned@samba.org>
+ * Copyright (C) 2003-2018 Wayne Davison <wayned@samba.org>
  */
 
 /* Load parameters.
@@ -93,6 +93,9 @@ struct parm_struct {
 /* This structure describes global (ie., server-wide) parameters. */
 typedef struct {
 	char *bind_address;
+	char *daemon_chroot;
+	char *daemon_gid;
+	char *daemon_uid;
 	char *motd_file;
 	char *pid_file;
 	char *socket_options;
@@ -129,6 +132,7 @@ typedef struct {
 	char *prexfer_exec;
 	char *refuse_options;
 	char *secrets_file;
+	char *syslog_tag;
 	char *temp_dir;
 	char *uid;
 /* NOTE: update this macro if the last char* variable changes! */
@@ -172,6 +176,9 @@ static const all_vars Defaults = {
  /* ==== global_vars ==== */
  {
  /* bind_address; */		NULL,
+ /* daemon_chroot; */		NULL,
+ /* daemon_gid; */		NULL,
+ /* daemon_uid; */		NULL,
  /* motd_file; */		NULL,
  /* pid_file; */		NULL,
  /* socket_options; */		NULL,
@@ -205,6 +212,7 @@ static const all_vars Defaults = {
  /* prexfer_exec; */		NULL,
  /* refuse_options; */		NULL,
  /* secrets_file; */		NULL,
+ /* syslog_tag; */		"rsyncd",
  /* temp_dir; */ 		NULL,
  /* uid; */			NULL,
 
@@ -313,6 +321,9 @@ static struct enum_list enum_facilities[] = {
 static struct parm_struct parm_table[] =
 {
  {"address",           P_STRING, P_GLOBAL,&Vars.g.bind_address,        NULL,0},
+ {"daemon chroot",     P_STRING, P_GLOBAL,&Vars.g.daemon_chroot,       NULL,0},
+ {"daemon gid",        P_STRING, P_GLOBAL,&Vars.g.daemon_gid,          NULL,0},
+ {"daemon uid",        P_STRING, P_GLOBAL,&Vars.g.daemon_uid,          NULL,0},
  {"listen backlog",    P_INTEGER,P_GLOBAL,&Vars.g.listen_backlog,      NULL,0},
  {"motd file",         P_STRING, P_GLOBAL,&Vars.g.motd_file,           NULL,0},
  {"pid file",          P_STRING, P_GLOBAL,&Vars.g.pid_file,            NULL,0},
@@ -357,6 +368,7 @@ static struct parm_struct parm_table[] =
  {"secrets file",      P_STRING, P_LOCAL, &Vars.l.secrets_file,        NULL,0},
  {"strict modes",      P_BOOL,   P_LOCAL, &Vars.l.strict_modes,        NULL,0},
  {"syslog facility",   P_ENUM,   P_LOCAL, &Vars.l.syslog_facility,     enum_facilities,0},
+ {"syslog tag",        P_STRING, P_LOCAL, &Vars.l.syslog_tag,          NULL,0},
  {"temp dir",          P_PATH,   P_LOCAL, &Vars.l.temp_dir,            NULL,0},
  {"timeout",           P_INTEGER,P_LOCAL, &Vars.l.timeout,             NULL,0},
  {"transfer logging",  P_BOOL,   P_LOCAL, &Vars.l.transfer_logging,    NULL,0},
@@ -444,6 +456,9 @@ static char *expand_vars(char *str)
  int fn_name(int i) {return LP_SNUM_OK(i)? iSECTION(i).val : Vars.l.val;}
 
 FN_GLOBAL_STRING(lp_bind_address, &Vars.g.bind_address)
+FN_GLOBAL_STRING(lp_daemon_chroot, &Vars.g.daemon_chroot)
+FN_GLOBAL_STRING(lp_daemon_gid, &Vars.g.daemon_gid)
+FN_GLOBAL_STRING(lp_daemon_uid, &Vars.g.daemon_uid)
 FN_GLOBAL_STRING(lp_motd_file, &Vars.g.motd_file)
 FN_GLOBAL_STRING(lp_pid_file, &Vars.g.pid_file)
 FN_GLOBAL_STRING(lp_socket_options, &Vars.g.socket_options)
@@ -474,6 +489,7 @@ FN_LOCAL_STRING(lp_postxfer_exec, postxfer_exec)
 FN_LOCAL_STRING(lp_prexfer_exec, prexfer_exec)
 FN_LOCAL_STRING(lp_refuse_options, refuse_options)
 FN_LOCAL_STRING(lp_secrets_file, secrets_file)
+FN_LOCAL_STRING(lp_syslog_tag, syslog_tag)
 FN_LOCAL_STRING(lp_temp_dir, temp_dir)
 FN_LOCAL_STRING(lp_uid, uid)
 

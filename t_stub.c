@@ -3,7 +3,7 @@
  * functions, so that module test harnesses can run standalone.
  *
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,11 +21,11 @@
 
 #include "rsync.h"
 
+int inplace = 0;
 int modify_window = 0;
 int preallocate_files = 0;
 int protect_args = 0;
 int module_id = -1;
-int checksum_len = 0;
 int relative_paths = 0;
 int module_dirlen = 0;
 int preserve_acls = 0;
@@ -96,4 +96,9 @@ filter_rule_list daemon_filter_list;
  const char *who_am_i(void)
 {
 	return "tester";
+}
+
+ int csum_len_for_type(int cst, int flg)
+{
+	return cst || !flg ? 16 : 1;
 }

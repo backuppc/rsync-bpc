@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1998-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2000-2001 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -31,12 +31,13 @@ extern int am_generator;
 extern int local_server;
 extern int quiet;
 extern int module_id;
-extern int checksum_len;
 extern int allow_8bit_chars;
 extern int protocol_version;
 extern int always_checksum;
 extern int preserve_times;
 extern int msgs2stderr;
+extern int xfersum_type;
+extern int checksum_type;
 extern int stdout_format_has_i;
 extern int stdout_format_has_o_or_i;
 extern int logfile_format_has_i;
@@ -46,6 +47,7 @@ extern int64 total_data_written;
 extern int64 total_data_read;
 extern mode_t orig_umask;
 extern char *auth_user;
+extern char *checksum_choice;
 extern char *stdout_format;
 extern char *logfile_format;
 extern char *logfile_name;
@@ -132,21 +134,16 @@ static void logit(int priority, const char *buf)
 
 static void syslog_init()
 {
-	static int been_here = 0;
 	int options = LOG_PID;
-
-	if (been_here)
-		return;
-	been_here = 1;
 
 #ifdef LOG_NDELAY
 	options |= LOG_NDELAY;
 #endif
 
 #ifdef LOG_DAEMON
-	openlog("rsyncd", options, lp_syslog_facility(module_id));
+	openlog(lp_syslog_tag(module_id), options, lp_syslog_facility(module_id));
 #else
-	openlog("rsyncd", options);
+	openlog(lp_syslog_tag(module_id), options);
 #endif
 
 #ifndef LOG_NDELAY
@@ -166,14 +163,16 @@ static void logfile_open(void)
 		rsyserr(FERROR, fopen_errno,
 			"failed to open log-file %s", logfile_name);
 		rprintf(FINFO, "Ignoring \"log file\" setting.\n");
+		logfile_name = "";
 	}
 }
 
 void log_init(int restart)
 {
 	if (log_initialised) {
-		if (!restart)
+		if (!restart) /* Note: a restart only happens with am_daemon */
 			return;
+		assert(logfile_name); /* all am_daemon procs got at least an empty string */
 		if (strcmp(logfile_name, lp_log_file(module_id)) != 0) {
 			if (logfile_fp) {
 				fclose(logfile_fp);
@@ -183,7 +182,8 @@ void log_init(int restart)
 			logfile_name = NULL;
 		} else if (*logfile_name)
 			return; /* unchanged, non-empty "log file" names */
-		else if (lp_syslog_facility(-1) != lp_syslog_facility(module_id))
+		else if (lp_syslog_facility(-1) != lp_syslog_facility(module_id)
+		      || strcmp(lp_syslog_tag(-1), lp_syslog_tag(module_id)) != 0)
 			closelog();
 		else
 			return; /* unchanged syslog settings */
@@ -205,6 +205,7 @@ void log_init(int restart)
 		syslog_init();
 }
 
+/* Note that this close & reopen idiom intentionally ignores syslog logging. */
 void logfile_close(void)
 {
 	if (logfile_fp) {
@@ -674,15 +675,18 @@ static void log_formatted(enum logcode code, const char *format, const char *op,
 			n = buf2;
 			break;
 		case 'C':
-			if (protocol_version >= 30
-			 && (iflags & ITEM_TRANSFER
-			  || (always_checksum && S_ISREG(file->mode)))) {
-				const char *sum = iflags & ITEM_TRANSFER
-						? sender_file_sum : F_SUM(file);
-				n = sum_as_hex(sum);
-			} else {
-				memset(buf2, ' ', checksum_len*2);
-				buf2[checksum_len*2] = '\0';
+			n = NULL;
+			if (S_ISREG(file->mode)) {
+				if (always_checksum && canonical_checksum(checksum_type))
+					n = sum_as_hex(checksum_type, F_SUM(file), 1);
+				else if (iflags & ITEM_TRANSFER && canonical_checksum(xfersum_type))
+					n = sum_as_hex(xfersum_type, sender_file_sum, 0);
+			}
+			if (!n) {
+				int sum_len = csum_len_for_type(always_checksum ? checksum_type : xfersum_type,
+								always_checksum);
+				memset(buf2, ' ', sum_len*2);
+				buf2[sum_len*2] = '\0';
 				n = buf2;
 			}
 			break;

@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1998-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2000, 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2002-2015 Wayne Davison
+ * Copyright (C) 2002-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -182,6 +182,7 @@ char *dest_option = NULL;
 static int remote_option_alloc = 0;
 int remote_option_cnt = 0;
 const char **remote_options = NULL;
+const char *checksum_choice = NULL;
 
 int quiet = 0;
 int output_motd = 1;
@@ -625,7 +626,7 @@ static void print_rsync_version(enum logcode f)
 
 	rprintf(f, "%s  version %s  protocol version %d%s\n",
 		RSYNC_NAME, RSYNC_VERSION, PROTOCOL_VERSION, subprotocol);
-	rprintf(f, "Copyright (C) 1996-2015 by Andrew Tridgell, Wayne Davison, and others.\n");
+	rprintf(f, "Copyright (C) 1996-2018 by Andrew Tridgell, Wayne Davison, and others.\n");
 	rprintf(f, "Web site: http://rsync.samba.org/\n");
 	rprintf(f, "Capabilities:\n");
 	rprintf(f, "    %d-bit files, %d-bit inums, %d-bit timestamps, %d-bit long ints,\n",
@@ -726,7 +727,7 @@ void usage(enum logcode F)
 #ifdef SUPPORT_XATTRS
   rprintf(F,"     --fake-super            store/recover privileged attrs using xattrs\n");
 #endif
-  rprintf(F," -S, --sparse                handle sparse files efficiently\n");
+  rprintf(F," -S, --sparse                turn sequences of nulls into sparse blocks\n");
 #ifdef SUPPORT_PREALLOCATION
   rprintf(F,"     --preallocate           allocate dest files before writing them\n");
 #else
@@ -734,6 +735,7 @@ void usage(enum logcode F)
 #endif
   rprintf(F," -n, --dry-run               perform a trial run with no changes made\n");
   rprintf(F," -W, --whole-file            copy files whole (without delta-xfer algorithm)\n");
+  rprintf(F,"     --checksum-choice=STR   choose the checksum algorithms\n");
   rprintf(F," -x, --one-file-system       don't cross filesystem boundaries\n");
   rprintf(F," -B, --block-size=SIZE       force a fixed checksum block-size\n");
   rprintf(F," -e, --rsh=COMMAND           specify the remote shell to use\n");
@@ -768,7 +770,7 @@ void usage(enum logcode F)
   rprintf(F," -I, --ignore-times          don't skip files that match in size and mod-time\n");
   rprintf(F," -M, --remote-option=OPTION  send OPTION to the remote side only\n");
   rprintf(F,"     --size-only             skip files that match in size\n");
-  rprintf(F,"     --modify-window=NUM     compare mod-times with reduced accuracy\n");
+  rprintf(F," -@, --modify-window=NUM     set the accuracy for mod-time comparisons\n");
   rprintf(F," -T, --temp-dir=DIR          create temporary files in directory DIR\n");
   rprintf(F," -y, --fuzzy                 find similar file for basis if no dest file\n");
   rprintf(F,"     --compare-dest=DIR      also compare destination files relative to DIR\n");
@@ -898,7 +900,7 @@ static struct poptOption long_options[] = {
   {"omit-link-times", 'J', POPT_ARG_VAL,    &omit_link_times, 1, 0, 0 },
   {"no-omit-link-times",0, POPT_ARG_VAL,    &omit_link_times, 0, 0, 0 },
   {"no-J",             0,  POPT_ARG_VAL,    &omit_link_times, 0, 0, 0 },
-  {"modify-window",    0,  POPT_ARG_INT,    &modify_window, OPT_MODIFY_WINDOW, 0, 0 },
+  {"modify-window",   '@', POPT_ARG_INT,    &modify_window, OPT_MODIFY_WINDOW, 0, 0 },
   {"super",            0,  POPT_ARG_VAL,    &am_root, 2, 0, 0 },
   {"no-super",         0,  POPT_ARG_VAL,    &am_root, 0, 0, 0 },
   {"fake-super",       0,  POPT_ARG_VAL,    &am_root, -1, 0, 0 },
@@ -980,6 +982,7 @@ static struct poptOption long_options[] = {
   {"cvs-exclude",     'C', POPT_ARG_NONE,   &cvs_exclude, 0, 0, 0 },
   {"whole-file",      'W', POPT_ARG_VAL,    &whole_file, 1, 0, 0 },
   {"no-whole-file",    0,  POPT_ARG_VAL,    &whole_file, 0, 0, 0 },
+  {"checksum-choice",  0,  POPT_ARG_STRING, &checksum_choice, 0, 0, 0 },
   {"no-W",             0,  POPT_ARG_VAL,    &whole_file, 0, 0, 0 },
   {"checksum",        'c', POPT_ARG_VAL,    &always_checksum, 1, 0, 0 },
   {"no-checksum",      0,  POPT_ARG_VAL,    &always_checksum, 0, 0, 0 },
@@ -1319,6 +1322,22 @@ static void create_refuse_error(int which)
 	}
 }
 
+/* This is used to make sure that --daemon & --server cannot be aliased to
+ * something else. These options have always disabled popt aliases for the
+ * parsing of a daemon or server command-line, but we have to make sure that
+ * these options cannot vanish so that the alias disabling can take effect. */
+static void popt_unalias(poptContext con, const char *opt)
+{
+	struct poptAlias unalias;
+
+	unalias.longName = opt + 2; /* point past the leading "--" */
+	unalias.shortName = '\0';
+	unalias.argc = 1;
+	unalias.argv = new_array(const char*, 1);
+	unalias.argv[0] = strdup(opt);
+
+	poptAddAlias(con, unalias, 0);
+}
 
 /**
  * Process command line arguments.  Called on both local and remote.
@@ -1335,6 +1354,7 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 	const char *arg, **argv = *argv_p;
 	int argc = *argc_p;
 	int opt;
+	int orig_protect_args = protect_args;
 
 	if (ref && *ref)
 		set_refuse_options(ref);
@@ -1358,8 +1378,11 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 	if (pc)
 		poptFreeContext(pc);
 	pc = poptGetContext(RSYNC_NAME, argc, argv, long_options, 0);
-	if (!am_server)
+	if (!am_server) {
 		poptReadDefaultConfig(pc, 0);
+		popt_unalias(pc, "--daemon");
+		popt_unalias(pc, "--server");
+	}
 
 	while ((opt = poptGetNextOpt(pc)) != -1) {
 		/* most options are handled automatically by popt;
@@ -1859,6 +1882,15 @@ int parse_arguments(int *argc_p, const char ***argv_p)
             exit_cleanup(RERR_SYNTAX);
         }
 
+	if (checksum_choice && strcmp(checksum_choice, "auto") != 0 && strcmp(checksum_choice, "auto,auto") != 0) {
+		/* Call this early to verify the args and figure out if we need to force
+		 * --whole-file. Note that the parse function will get called again later,
+		 * just in case an "auto" choice needs to know the protocol_version. */
+		if (parse_checksum_choice())
+			whole_file = 1;
+	} else
+		checksum_choice = NULL;
+
 	if (human_readable > 1 && argc == 2 && !am_server) {
 		/* Allow the old meaning of 'h' (--help) on its own. */
 		usage(FINFO);
@@ -1947,6 +1979,10 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 
 	if (fuzzy_basis > 1)
 		fuzzy_basis = basis_dir_cnt + 1;
+
+	/* Don't let the client reset protect_args if it was already processed */
+	if (orig_protect_args == 2 && am_server)
+		protect_args = orig_protect_args;
 
 	if (protect_args == 1 && am_server)
 		return 1;
@@ -2641,6 +2677,12 @@ void server_options(char **args, int *argc_p)
 		args[ac++] = arg;
 	}
 
+	if (checksum_choice) {
+		if (asprintf(&arg, "--checksum-choice=%s", checksum_choice) < 0)
+			goto oom;
+		args[ac++] = arg;
+	}
+
 	if (am_sender) {
 		if (max_delete > 0) {
 			if (asprintf(&arg, "--max-delete=%d", max_delete) < 0)
@@ -2693,8 +2735,9 @@ void server_options(char **args, int *argc_p)
 	else if (missing_args == 1 && !am_sender)
 		args[ac++] = "--ignore-missing-args";
 
-	if (modify_window_set) {
-		if (asprintf(&arg, "--modify-window=%d", modify_window) < 0)
+	if (modify_window_set && am_sender) {
+		char *fmt = modify_window < 0 ? "-@%d" : "--modify-window=%d";
+		if (asprintf(&arg, fmt, modify_window) < 0)
 			goto oom;
 		args[ac++] = arg;
 	}

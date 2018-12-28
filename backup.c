@@ -2,7 +2,7 @@
  * Backup handling code.
  *
  * Copyright (C) 1999 Andrew Tridgell
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -333,7 +333,7 @@ int make_backup(const char *fname, BOOL prefer_rename)
 
 	save_preserve_xattrs = preserve_xattrs;
 	preserve_xattrs = 0;
-	set_file_attrs(buf, file, NULL, fname, 0);
+	set_file_attrs(buf, file, NULL, fname, ATTRS_SET_NANO);
 	preserve_xattrs = save_preserve_xattrs;
 
 	unmake_file(file);

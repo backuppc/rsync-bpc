@@ -2,7 +2,7 @@
  * Trivial ls for comparing two directories after running an rsync.
  *
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -51,6 +51,8 @@ int link_owner = 0;
 int nsec_times = 0;
 int preserve_perms = 0;
 int preserve_executability = 0;
+int preallocate_files = 0;
+int inplace = 0;
 
 #ifdef SUPPORT_XATTRS
 

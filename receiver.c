@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -50,11 +50,12 @@ extern int append_mode;
 extern int sparse_files;
 extern int preallocate_files;
 extern int keep_partial;
-extern int checksum_len;
 extern int checksum_seed;
+extern int whole_file;
 extern int inplace;
 extern int allowed_lull;
 extern int delay_updates;
+extern int xfersum_type;
 extern mode_t orig_umask;
 extern struct stats stats;
 extern char *tmpdir;
@@ -63,6 +64,7 @@ extern char *basis_dir[MAX_BASIS_DIRS+1];
 extern char sender_file_sum[MAX_DIGEST_LEN];
 extern struct file_list *cur_flist, *first_flist, *dir_flist;
 extern filter_rule_list daemon_filter_list;
+extern OFF_T preallocated_len;
 
 static struct bitbag *delayed_bits = NULL;
 static int phase = 0, redoing = 0;
@@ -247,22 +249,26 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 	int32 i;
 	char *map = NULL;
         int replayTokenCnt = 0;
-#ifdef SUPPORT_PREALLOCATION
-#ifdef PREALLOCATE_NEEDS_TRUNCATE
-	OFF_T preallocated_len = 0;
-#endif
 
+#ifdef SUPPORT_PREALLOCATION
 	if (preallocate_files && fd != -1 && total_size > 0 && (!inplace || total_size > size_r)) {
 		/* Try to preallocate enough space for file's eventual length.  Can
 		 * reduce fragmentation on filesystems like ext4, xfs, and NTFS. */
-		if (do_fallocate(fd, 0, total_size) == 0) {
-#ifdef PREALLOCATE_NEEDS_TRUNCATE
-			preallocated_len = total_size;
-#endif
-		} else
+                 if ((preallocated_len = do_fallocate(fd, 0, total_size)) < 0)
 			rsyserr(FWARNING, errno, "do_fallocate %s", full_fname(fname));
-	}
+        } else
 #endif
+        if (inplace) {
+#ifdef HAVE_FTRUNCATE
+                /* The most compatible way to create a sparse file is to start with no length. */
+                if (sparse_files > 0 && whole_file && fd >= 0 && do_ftruncate(fd, 0) == 0)
+                        preallocated_len = 0;
+                else
+#endif
+                        preallocated_len = size_r;
+        } else
+                preallocated_len = 0;
+
 
 	if (fd_r >= 0 && size_r > 0) {
 		int32 read_size = MAX(sum->blength * 2, 16*1024);
@@ -274,7 +280,7 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 	} else
 		mapbuf = NULL;
 
-	sum_init(checksum_seed);
+	sum_init(xfersum_type, checksum_seed);
 
 	if (append_mode > 0) {
 		OFF_T j;
@@ -369,7 +375,7 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 				}
                                 offsetDefer = 0;
                         }
-			if (fd != -1 && write_file(fd,data,i) != i)
+			if (fd != -1 && write_file(fd, 0, offset, data, i) != i)
 				goto report_write_error;
 			offset += i;
 			continue;
@@ -418,7 +424,7 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 				}
                                 offsetDefer = 0;
                         }
-                        if ( write_file(fd, map, len) != (int)len)
+                        if ( write_file(fd, 0, offset, map, len) != (int)len)
                                 goto report_write_error;
 		}
 		offset += len;
@@ -437,18 +443,17 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
                 offsetDefer = 0;
         }
 
-	if (flush_write_file(fd) < 0)
-		goto report_write_error;
+	if (flush_write_file(fd) < 0) {
+            report_write_error:
+		rsyserr(FERROR_XFER, errno, "write failed on %s", full_fname(fname));
+		exit_cleanup(RERR_FILEIO);
+        }
 
 #ifdef HAVE_FTRUNCATE
 	/* inplace: New data could be shorter than old data.
 	 * preallocate_files: total_size could have been an overestimate.
 	 *     Cut off any extra preallocated zeros from dest file. */
-	if ((1
-#ifdef PREALLOCATE_NEEDS_TRUNCATE
-	  || preallocated_len > offset
-#endif
-	  ) && fd != -1 && do_ftruncate(fd, offset) < 0) {
+	if ((1 || preallocated_len > offset) && fd != -1 && do_ftruncate(fd, offset) < 0) {
 		rsyserr(FERROR_XFER, errno, "ftruncate failed on %s",
 			full_fname(fname));
 	}
@@ -456,13 +461,6 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 
 	if (INFO_GTE(PROGRESS, 1))
 		end_progress(total_size);
-
-	if (fd != -1 && offset > 0 && sparse_end(fd, offset) != 0) {
-	    report_write_error:
-		rsyserr(FERROR_XFER, errno, "write failed on %s",
-			full_fname(fname));
-		exit_cleanup(RERR_FILEIO);
-	}
 
         sum_len = sum_end(file_sum1);
 
@@ -478,6 +476,7 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
         }
 	if (DEBUG_GTE(DELTASUM, 2))
 		rprintf(FINFO,"got file_sum\n");
+	memcpy(sender_file_sum, file_sum2, sum_len);
 	if (fd != -1 && memcmp(file_sum1, file_sum2, sum_len) != 0)
 		return 0;
 	return 1;
@@ -668,6 +667,12 @@ int recv_files(int f_in, int f_out, char *local_name)
 		if (DEBUG_GTE(RECV, 1))
 			rprintf(FINFO, "recv_files(%s)\n", fname);
 
+		if (daemon_filter_list.head && (*fname != '.' || fname[1] != '\0')
+		 && check_filter(&daemon_filter_list, FLOG, fname, 0) < 0) {
+			rprintf(FERROR, "attempt to hack rsync failed.\n");
+			exit_cleanup(RERR_PROTOCOL);
+		}
+
 #ifdef SUPPORT_XATTRS
 		if (preserve_xattrs && iflags & ITEM_REPORT_XATTR && do_xfers
 		 && !(want_xattr_optim && BITS_SET(iflags, ITEM_XNAME_FOLLOWS|ITEM_LOCAL_CHANGE)))
@@ -735,12 +740,6 @@ int recv_files(int f_in, int f_out, char *local_name)
 		stats.total_transferred_size += F_LENGTH(file);
 
 		cleanup_got_literal = 0;
-
-		if (daemon_filter_list.head
-		    && check_filter(&daemon_filter_list, FLOG, fname, 0) < 0) {
-			rprintf(FERROR, "attempt to hack rsync failed.\n");
-			exit_cleanup(RERR_PROTOCOL);
-		}
 
                 read_sum_head(f_in, &sum);
 
@@ -818,7 +817,7 @@ int recv_files(int f_in, int f_out, char *local_name)
 				break;
 			}
 			if (!fnamecmp || (daemon_filter_list.head
-			  && check_filter(&daemon_filter_list, FLOG, fname, 0) < 0)) {
+			  && check_filter(&daemon_filter_list, FLOG, fnamecmp, 0) < 0)) {
 				fnamecmp = fname;
 				fnamecmp_type = FNAMECMP_FNAME;
 			}
