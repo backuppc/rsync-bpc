@@ -4,7 +4,7 @@
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2002-2015 Wayne Davison
+ * Copyright (C) 2002-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,9 +33,11 @@ extern int am_sender;
 extern int am_generator;
 extern int inc_recurse;
 extern int always_checksum;
+extern int checksum_type;
 extern int module_id;
 extern int ignore_errors;
 extern int numeric_ids;
+extern int quiet;
 extern int recurse;
 extern int use_qsort;
 extern int xfer_dirs;
@@ -89,7 +91,7 @@ extern iconv_t ic_send, ic_recv;
 #define PTR_SIZE (sizeof (struct file_struct *))
 
 int io_error;
-int checksum_len;
+int flist_csum_len;
 dev_t filesystem_dev; /* used to implement -x */
 
 struct file_list *cur_flist, *first_flist, *dir_flist;
@@ -127,6 +129,7 @@ static char tmp_sum[MAX_DIGEST_LEN];
 
 static char empty_sum[MAX_DIGEST_LEN];
 static int flist_count_offset; /* for --delete --progress */
+static int show_filelist_progress;
 
 static void flist_sort_and_clean(struct file_list *flist, int strip_root);
 static void output_flist(struct file_list *flist);
@@ -137,18 +140,16 @@ void init_flist(void)
 		rprintf(FINFO, "FILE_STRUCT_LEN=%d, EXTRA_LEN=%d\n",
 			(int)FILE_STRUCT_LEN, (int)EXTRA_LEN);
 	}
-	checksum_len = protocol_version < 21 ? 2
-		     : protocol_version < 30 ? MD4_DIGEST_LEN
-		     : MD5_DIGEST_LEN;
-}
+	parse_checksum_choice(); /* Sets checksum_type && xfersum_type */
+	flist_csum_len = csum_len_for_type(checksum_type, 1);
 
-static int show_filelist_p(void)
-{
-	return INFO_GTE(FLIST, 1) && xfer_dirs && !am_server && !inc_recurse;
+	show_filelist_progress = INFO_GTE(FLIST, 1) && xfer_dirs && !am_server && !inc_recurse;
 }
 
 static void start_filelist_progress(char *kind)
 {
+	if (quiet)
+		return;
 	rprintf(FCLIENT, "%s ... ", kind);
 	output_needs_newline = 1;
 	rflush(FINFO);
@@ -156,23 +157,28 @@ static void start_filelist_progress(char *kind)
 
 static void emit_filelist_progress(int count)
 {
+	if (quiet)
+		return;
+	if (output_needs_newline == 2) /* avoid a newline in the middle of this filelist-progress output */
+		output_needs_newline = 0;
 	rprintf(FCLIENT, " %d files...\r", count);
+	output_needs_newline = 2;
 }
 
 static void maybe_emit_filelist_progress(int count)
 {
-	if (INFO_GTE(FLIST, 2) && show_filelist_p() && (count % 100) == 0)
+	if (INFO_GTE(FLIST, 2) && show_filelist_progress && (count % 100) == 0)
 		emit_filelist_progress(count);
 }
 
 static void finish_filelist_progress(const struct file_list *flist)
 {
+	output_needs_newline = 0;
 	if (INFO_GTE(FLIST, 2)) {
 		/* This overwrites the progress line */
 		rprintf(FINFO, "%d file%sto consider\n",
 			flist->used, flist->used == 1 ? " " : "s ");
 	} else {
-		output_needs_newline = 0;
 		rprintf(FINFO, "done\n");
 	}
 }
@@ -237,16 +243,6 @@ int link_stat(const char *path, STRUCT_STAT *stp, int follow_dirlinks)
 #endif
 }
 
-static inline int is_daemon_excluded(const char *fname, int is_dir)
-{
-	if (daemon_filter_list.head
-	 && check_filter(&daemon_filter_list, FLOG, fname, is_dir) < 0) {
-		errno = ENOENT;
-		return 1;
-	}
-	return 0;
-}
-
 static inline int path_is_daemon_excluded(char *path, int ignore_filename)
 {
 	if (daemon_filter_list.head) {
@@ -273,23 +269,9 @@ static inline int path_is_daemon_excluded(char *path, int ignore_filename)
 	return 0;
 }
 
-/* This function is used to check if a file should be included/excluded
- * from the list of files based on its name and type etc.  The value of
- * filter_level is set to either SERVER_FILTERS or ALL_FILTERS. */
-static int is_excluded(const char *fname, int is_dir, int filter_level)
+static inline int is_excluded(const char *fname, int is_dir, int filter_level)
 {
-#if 0 /* This currently never happens, so avoid a useless compare. */
-	if (filter_level == NO_FILTERS)
-		return 0;
-#endif
-	if (is_daemon_excluded(fname, is_dir))
-		return 1;
-	if (filter_level != ALL_FILTERS)
-		return 0;
-	if (filter_list.head
-	    && check_filter(&filter_list, FINFO, fname, is_dir) < 0)
-		return 1;
-	return 0;
+	return name_is_excluded(fname, is_dir ? NAME_IS_DIR : NAME_IS_FILE, filter_level);
 }
 
 static void send_directory(int f, struct file_list *flist,
@@ -656,7 +638,7 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 			/* Prior to 28, we sent a useless set of nulls. */
 			sum = empty_sum;
 		}
-		write_buf(f, sum, checksum_len);
+		write_buf(f, sum, flist_csum_len);
 	}
 
 #ifdef SUPPORT_HARD_LINKS
@@ -913,7 +895,7 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 	if (file_length > 0xFFFFFFFFu && S_ISREG(mode))
 		extra_len += EXTRA_LEN;
 #endif
-#ifdef HAVE_UTIMENSAT
+#ifdef CAN_SET_NSEC
 	if (modtime_nsec)
 		extra_len += EXTRA_LEN;
 #endif
@@ -959,12 +941,12 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 		file->flags |= FLAG_HLINKED;
 #endif
 	file->modtime = (time_t)modtime;
+#ifdef CAN_SET_NSEC
 	if (modtime_nsec) {
-#ifdef HAVE_UTIMENSAT
 		file->flags |= FLAG_MOD_NSEC;
 		OPT_EXTRA(file, 0)->unum = modtime_nsec;
-#endif
 	}
+#endif
 	file->len32 = (uint32)file_length;
 #if SIZEOF_INT64 >= 8
 	if (file_length > 0xFFFFFFFFu && S_ISREG(mode)) {
@@ -1112,9 +1094,9 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 		}
 		if (first_hlink_ndx >= flist->ndx_start) {
 			struct file_struct *first = flist->files[first_hlink_ndx - flist->ndx_start];
-			memcpy(bp, F_SUM(first), checksum_len);
+			memcpy(bp, F_SUM(first), flist_csum_len);
 		} else
-			read_buf(f, bp, checksum_len);
+			read_buf(f, bp, flist_csum_len);
 	}
 
 #ifdef SUPPORT_ACLS
@@ -1402,7 +1384,7 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 	}
 
 	if (sender_keeps_checksum && S_ISREG(st.st_mode))
-		memcpy(F_SUM(file), tmp_sum, checksum_len);
+		memcpy(F_SUM(file), tmp_sum, flist_csum_len);
 
 	if (unsort_ndx)
 		F_NDX(file) = stats.num_dirs;
@@ -2087,7 +2069,7 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 	int implied_dot_dir = 0;
 
 	rprintf(FLOG, "building file list\n");
-	if (show_filelist_p())
+	if (show_filelist_progress)
 		start_filelist_progress("building file list");
 	else if (inc_recurse && INFO_GTE(FLIST, 1) && !am_server)
 		rprintf(FCLIENT, "sending incremental file list\n");
@@ -2262,7 +2244,7 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 			memmove(fbuf, fn, len + 1);
 
 		if (link_stat(fbuf, &st, copy_dirlinks || name_type != NORMAL_NAME) != 0
-		 || (name_type != DOTDIR_NAME && is_daemon_excluded(fbuf, S_ISDIR(st.st_mode)))
+		 || (name_type != DOTDIR_NAME && is_excluded(fbuf, S_ISDIR(st.st_mode) != 0, SERVER_FILTERS))
 		 || (relative_paths && path_is_daemon_excluded(fbuf, 1))) {
 			if (errno != ENOENT || missing_args == 0) {
 				/* This is a transfer error, but inhibit deletion
@@ -2361,7 +2343,7 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 		idev_destroy();
 #endif
 
-	if (show_filelist_p())
+	if (show_filelist_progress)
 		finish_filelist_progress(flist);
 
 	gettimeofday(&end_tv, NULL);
@@ -2443,7 +2425,7 @@ struct file_list *recv_file_list(int f, int dir_ndx)
 	int64 start_read;
 
 	if (!first_flist) {
-		if (show_filelist_p())
+		if (show_filelist_progress)
 			start_filelist_progress("receiving file list");
 		else if (inc_recurse && INFO_GTE(FLIST, 1) && !am_server)
 			rprintf(FCLIENT, "receiving incremental file list\n");
@@ -2539,7 +2521,7 @@ struct file_list *recv_file_list(int f, int dir_ndx)
 	if (DEBUG_GTE(FLIST, 2))
 		rprintf(FINFO, "received %d names\n", flist->used);
 
-	if (show_filelist_p())
+	if (show_filelist_progress)
 		finish_filelist_progress(flist);
 
 	if (need_unsorted_flist) {
@@ -2961,8 +2943,7 @@ static void flist_sort_and_clean(struct file_list *flist, int strip_root)
 					clear_file(fp);
 				}
 				prev_depth = F_DEPTH(file);
-				if (is_excluded(f_name(file, fbuf), 1,
-						       ALL_FILTERS)) {
+				if (is_excluded(f_name(file, fbuf), 1, ALL_FILTERS)) {
 					/* Keep dirs through this dir. */
 					for (j = prev_depth-1; ; j--) {
 						fp = flist->sorted[prev_i];

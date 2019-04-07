@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,8 +24,6 @@
 #include "ifuncs.h"
 #include "itypes.h"
 #include "inums.h"
-
-extern int checksum_len;
 
 /**
  * Sleep for a specified number of milliseconds.
@@ -79,17 +77,18 @@ void *_realloc_array(void *ptr, unsigned int size, size_t num)
 	return realloc(ptr, size * num);
 }
 
-const char *sum_as_hex(const char *sum)
+const char *sum_as_hex(int csum_type, const char *sum, int flist_csum)
 {
 	static char buf[MAX_DIGEST_LEN*2+1];
 	int i, x1, x2;
-	char *c = buf + checksum_len*2;
+	int sum_len = csum_len_for_type(csum_type, flist_csum);
+	char *c = buf + sum_len*2;
 
 	assert(c - buf < (int)sizeof buf);
 
 	*c = '\0';
 
-	for (i = checksum_len; --i >= 0; ) {
+	for (i = sum_len; --i >= 0; ) {
 		x1 = CVAL(sum, i);
 		x2 = x1 >> 4;
 		x1 &= 0xF;

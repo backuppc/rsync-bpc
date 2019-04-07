@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -302,6 +302,13 @@ static void output_itemized_counts(const char *prefix, int *counts)
 	rprintf(FINFO, "%s: %s%s\n", prefix, comma_num(total), buf);
 }
 
+static const char *bytes_per_sec_human_dnum(void)
+{
+	if (starttime == (time_t)-1 || endtime == (time_t)-1)
+		return "UNKNOWN";
+	return human_dnum((total_written + total_read) / (0.5 + (endtime - starttime)), 2);
+}
+
 static void output_summary(void)
 {
 	if (INFO_GTE(STATS, 2)) {
@@ -342,7 +349,7 @@ static void output_summary(void)
 		rprintf(FINFO,
 			"sent %s bytes  received %s bytes  %s bytes/sec\n",
 			human_num(total_written), human_num(total_read),
-			human_dnum((total_written + total_read)/(0.5 + (endtime - starttime)), 2));
+			bytes_per_sec_human_dnum());
 		rprintf(FINFO, "total size is %s  speedup is %s%s\n",
 			human_num(stats.total_size),
 			comma_dnum((double)stats.total_size / (total_written+total_read), 2),
@@ -776,7 +783,7 @@ static void read_final_goodbye(int f_in, int f_out)
 static void do_server_sender(int f_in, int f_out, int argc, char *argv[])
 {
 	struct file_list *flist;
-	char *dir = argv[0];
+	char *dir;
 
 	if (DEBUG_GTE(SEND, 1))
 		rprintf(FINFO, "server_sender starting pid=%d\n", (int)getpid());
@@ -784,16 +791,19 @@ static void do_server_sender(int f_in, int f_out, int argc, char *argv[])
 	if (am_daemon && lp_write_only(module_id)) {
 		rprintf(FERROR, "ERROR: module is write only\n");
 		exit_cleanup(RERR_SYNTAX);
-		return;
 	}
 	if (am_daemon && read_only && remove_source_files) {
 		rprintf(FERROR,
-		    "ERROR: --remove-%s-files cannot be used with a read-only module\n",
-		    remove_source_files == 1 ? "source" : "sent");
+			"ERROR: --remove-%s-files cannot be used with a read-only module\n",
+			remove_source_files == 1 ? "source" : "sent");
 		exit_cleanup(RERR_SYNTAX);
-		return;
+	}
+	if (argc < 1) {
+		rprintf(FERROR, "ERROR: do_server_sender called without args\n");
+		exit_cleanup(RERR_SYNTAX);
 	}
 
+	dir = argv[0];
 	if (!relative_paths) {
 		if (!change_dir(dir, CD_NORMAL)) {
 			rsyserr(FERROR, errno, "change_dir#3 %s failed",
@@ -865,7 +875,8 @@ static int do_recv(int f_in, int f_out, char *local_name)
 				rprintf(FERROR, "Failed to stat %s: %s\n", backup_dir_buf, strerror(errno));
 				exit_cleanup(RERR_FILEIO);
 			}
-			rprintf(FINFO, "(new) backup_dir is %s\n", backup_dir_buf);
+			if (INFO_GTE(BACKUP, 1))
+				rprintf(FINFO, "(new) backup_dir is %s\n", backup_dir_buf);
 		} else if (INFO_GTE(BACKUP, 1))
 			rprintf(FINFO, "backup_dir is %s\n", backup_dir_buf);
 		if (backup_dir_len > 1)
@@ -1612,8 +1623,6 @@ int main(int argc,char *argv[])
 	 * work when there are other child processes.  Also, on all systems
 	 * that implement getcwd that way "pwd" can't be found after chroot. */
 	change_dir(NULL, CD_NORMAL);
-
-	init_flist();
 
 	if ((write_batch || read_batch) && !am_server) {
 		if (write_batch)

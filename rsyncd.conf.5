@@ -1,4 +1,4 @@
-.TH "rsyncd.conf" "5" "21 Dec 2015" "" ""
+.TH "rsyncd.conf" "5" "28 Jan 2018" "" ""
 .SH "NAME"
 rsyncd.conf \- configuration file for rsync in daemon mode
 .SH "SYNOPSIS"
@@ -207,8 +207,8 @@ transfer.  For example, specifying \(dq\&/var/rsync/./module1\(dq\& will chroot 
 had omitted the dot\-dir, the chroot would have used the whole path, and the
 inside\-chroot path would have been \(dq\&/\(dq\&.
 .IP 
-When \(dq\&use chroot\(dq\& is false or the inside\-chroot path is not \(dq\&/\(dq\&, rsync will:
-(1) munge symlinks by
+When both \(dq\&use chroot\(dq\& and \(dq\&daemon chroot\(dq\& are false, OR the inside\-chroot path
+of \(dq\&use chroot\(dq\& is not \(dq\&/\(dq\&, rsync will: (1) munge symlinks by
 default for security reasons (see \(dq\&munge symlinks\(dq\& for a way to turn this
 off, but only if you trust your users), (2) substitute leading slashes in
 absolute paths with the module\(cq\&s path (so that options such as
@@ -227,11 +227,20 @@ should protect them through your OS\(cq\&s normal user/group or ACL settings (to
 prevent the rsync module\(cq\&s user from being able to change them), and then
 hide them from the user\(cq\&s view via \(dq\&exclude\(dq\& (see how in the discussion of
 that parameter).  At that point it will be safe to enable the mapping of users
-and groups by name using this \(dq\&numeric ids\(dq\& daemon parameter.
+and groups by name using the \(dq\&numeric ids\(dq\& daemon parameter (see below).
 .IP 
 Note also that you are free to setup custom user/group information in the
 chroot area that is different from your normal system.  For example, you
 could abbreviate the list of users and groups.
+.IP 
+.IP "\fBdaemon chroot\fP"
+This parameter specifies a path to which the daemon will
+chroot before beginning communication with clients. Module paths (and any \(dq\&use
+chroot\(dq\& settings) will then be related to this one. This lets you choose if you
+want the whole daemon to be chrooted (with this setting), just the transfers to
+be chrooted (with \(dq\&use chroot\(dq\&), or both.  Keep in mind that the \(dq\&daemon chroot\(dq\&
+area may need various OS/lib/etc files installed to allow the daemon to function.
+By default the daemon runs without any chrooting.
 .IP 
 .IP "\fBnumeric ids\fP"
 Enabling this parameter disables the mapping
@@ -254,7 +263,7 @@ resources.  That includes being the code being able to call functions like
 \f(CWgetpwname()\fP
 , and 
 \f(CWgetgrnam()\fP
-).
+\&.
 You should test what libraries and config files are required for your OS
 and get those setup before starting to test name mapping in rsync.
 .IP 
@@ -264,7 +273,8 @@ all symlinks in the same way as the (non\-daemon\-affecting)
 \fB\-\-munge\-links\fP command\-line option (using a method described below).
 This should help protect your files from user trickery when
 your daemon module is writable.  The default is disabled when \(dq\&use chroot\(dq\&
-is on and the inside\-chroot path is \(dq\&/\(dq\&, otherwise it is enabled.
+is on with an inside\-chroot path of \(dq\&/\(dq\&, OR if \(dq\&daemon chroot\(dq\& is on,
+otherwise it is enabled.
 .IP 
 If you disable this parameter on a daemon that is not read\-only, there
 are tricks that a user can play with uploaded symlinks to access
@@ -354,6 +364,21 @@ is daemon.  This setting has no effect if the \(dq\&log file\(dq\& setting is a
 non\-empty string (either set in the per\-modules settings, or inherited
 from the global settings).
 .IP 
+.IP "\fBsyslog tag\fP"
+This parameter allows you to specify the syslog
+tag to use when logging messages from the rsync daemon. The default is
+\(dq\&rsyncd\(dq\&.  This setting has no effect if the \(dq\&log file\(dq\& setting is a
+non\-empty string (either set in the per\-modules settings, or inherited
+from the global settings).
+.IP 
+For example, if you wanted each authenticated user\(cq\&s name to be
+included in the syslog tag, you could do something like this:
+.IP 
+.nf 
+    syslog tag = rsyncd.%RSYNC_USER_NAME%
+.fi 
+
+.IP 
 .IP "\fBmax verbosity\fP"
 This parameter allows you to control
 the maximum amount of verbose information that you\(cq\&ll allow the daemon to
@@ -389,6 +414,9 @@ will be able to download files or not. If \(dq\&write only\(dq\& is true then an
 attempted downloads will fail. If \(dq\&write only\(dq\& is false then downloads
 will be possible if file permissions on the daemon side allow them.  The
 default is for this parameter to be disabled.
+.IP 
+Helpful hint: you probably want to specify \(dq\&refuse options = delete\(dq\& for a
+write\-only module.
 .IP 
 .IP "\fBlist\fP"
 This parameter determines whether this module is
@@ -428,6 +456,16 @@ switch to your OS\(cq\&s \(dq\&nobody\(dq\& (or perhaps \(dq\&nogroup\(dq\&) gro
 supplementary groups.  The default for a non\-super\-user is to not change any
 group attributes (and indeed, your OS may not allow a non\-super\-user to try to
 change their group settings).
+.IP 
+.IP "\fBdaemon uid\fP"
+This parameter specifies a uid under which the daemon will
+run. The daemon usually runs as user root, and when this is left unset the user
+is left unchanged. See also the \(dq\&uid\(dq\& parameter.
+.IP 
+.IP "\fBdaemon gid\fP"
+This parameter specifies a gid under which the daemon will
+run. The daemon usually runs as group root, and when this is left unset, the
+group is left unchanged. See also the \(dq\&gid\(dq\& parameter.
 .IP 
 .IP "\fBfake super\fP"
 Setting \(dq\&fake super = yes\(dq\& for a module causes the
@@ -552,6 +590,16 @@ group \(dq\&guest\(dq\&).  Any other user who is in group \(dq\&rsync\(dq\& will
 access.  Finally, users susan, joe, and sam get the ro/rw setting of the
 module, but only if the user didn\(cq\&t match an earlier group\-matching rule.
 .IP 
+If you need to specify a user or group name with a space in it, start your list
+with a comma to indicate that the list should only be split on commas (though
+leading and trailing whitespace will also be removed, and empty entries are
+just ignored).  For example:
+.IP 
+.nf 
+  auth users = , joe:deny, @Some Group:deny, admin:rw, @RO Group:ro 
+.fi 
+
+.IP 
 See the description of the secrets file for how you can have per\-user passwords
 as well as per\-group passwords.  It also explains how a user can authenticate
 using their user password or (when applicable) a group password, depending on
@@ -597,9 +645,9 @@ false, the check is not performed.  The default is true.  This parameter
 was added to accommodate rsync running on the Windows operating system.
 .IP 
 .IP "\fBhosts allow\fP"
-This parameter allows you to specify a
-list of patterns that are matched against a connecting clients
-hostname and IP address. If none of the patterns match then the
+This parameter allows you to specify a list of comma\-
+and/or whitespace\-separated patterns that are matched against a connecting
+client\(cq\&s hostname and IP address.  If none of the patterns match, then the
 connection is rejected.
 .IP 
 Each pattern can be in one of five forms:
@@ -654,9 +702,9 @@ connect.
 The default is no \(dq\&hosts allow\(dq\& parameter, which means all hosts can connect.
 .IP 
 .IP "\fBhosts deny\fP"
-This parameter allows you to specify a
-list of patterns that are matched against a connecting clients
-hostname and IP address. If the pattern matches then the connection is
+This parameter allows you to specify a list of comma\-
+and/or whitespace\-separated patterns that are matched against a connecting
+clients hostname and IP address. If the pattern matches then the connection is
 rejected. See the \(dq\&hosts allow\(dq\& parameter for more information.
 .IP 
 The default is no \(dq\&hosts deny\(dq\& parameter, which means all hosts can connect.
@@ -734,7 +782,7 @@ The single\-character escapes that are understood are as follows:
 .IP o 
 %c the total size of the block checksums received for the basis file (only when sending)
 .IP o 
-%C the full\-file MD5 checksum if \fB\-\-checksum\fP is enabled or a file was transferred (only for protocol 30 or above).
+%C the full\-file checksum if it is known for the file. For older rsync protocols/versions, the checksum was salted, and is thus not a useful value (and is not displayed when that is the case). For the checksum to output for a file, either the \fB\-\-checksum\fP option must be in\-effect or the file must have been transferred without a salted checksum being used. See the \fB\-\-checksum\-choice\fP option for a way to choose the algorithm.
 .IP o 
 %f the filename (long form on sender; no trailing \(dq\&/\(dq\&)
 .IP o 
@@ -1049,7 +1097,7 @@ http://rsync.samba.org/
 .SH "VERSION"
 
 .PP 
-This man page is current for version 3.1.2 of rsync.
+This man page is current for version 3.1.3 of rsync.
 .PP 
 .SH "CREDITS"
 

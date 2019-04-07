@@ -1,6 +1,6 @@
 dnl Process this file with autoconf to produce a configure script.
 
-AC_INIT([rsync],[3.1.2.0],[http://rsync.samba.org/bugzilla.html])
+AC_INIT([rsync],[3.1.3.beta0],[http://rsync.samba.org/bugzilla.html])
 
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR([byteorder.h])
@@ -400,6 +400,7 @@ AC_CHECK_TYPES([mode_t,off_t,size_t,pid_t,id_t])
 AC_TYPE_GETGROUPS
 AC_CHECK_MEMBERS([struct stat.st_rdev,
 		  struct stat.st_mtimensec,
+		  struct stat.st_mtimespec.tv_nsec,
 		  struct stat.st_mtim.tv_nsec],,,[
 #ifdef HAVE_SYS_TYPES_H
 #include <sys/types.h>
@@ -613,6 +614,36 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <fcntl.h>
 if test x"$rsync_cv_have_fallocate" = x"yes"; then
     AC_DEFINE(HAVE_FALLOCATE, 1, [Define to 1 if you have the fallocate function and it compiles and links without error])
 fi
+
+AC_MSG_CHECKING([for FALLOC_FL_PUNCH_HOLE])
+AC_PREPROC_IFELSE([AC_LANG_SOURCE([[
+        #define _GNU_SOURCE 1
+        #include <linux/falloc.h>
+        #ifndef FALLOC_FL_PUNCH_HOLE
+        #error FALLOC_FL_PUNCH_HOLE is missing
+        #endif
+    ]])], [
+        AC_MSG_RESULT([yes])
+        AC_DEFINE([HAVE_FALLOC_FL_PUNCH_HOLE], [1], [Define if FALLOC_FL_PUNCH_HOLE is available.])
+    ], [
+        AC_MSG_RESULT([no])
+    ]
+)
+
+AC_MSG_CHECKING([for FALLOC_FL_ZERO_RANGE])
+AC_PREPROC_IFELSE([AC_LANG_SOURCE([[
+        #define _GNU_SOURCE 1
+        #include <linux/falloc.h>
+        #ifndef FALLOC_FL_ZERO_RANGE
+        #error FALLOC_FL_ZERO_RANGE is missing
+        #endif
+    ]])], [
+        AC_MSG_RESULT([yes])
+        AC_DEFINE([HAVE_FALLOC_FL_ZERO_RANGE], [1], [Define if FALLOC_FL_ZERO_RANGE is available.])
+    ], [
+        AC_MSG_RESULT([no])
+    ]
+)
 
 AC_CACHE_CHECK([for SYS_fallocate],rsync_cv_have_sys_fallocate,[
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <sys/syscall.h>

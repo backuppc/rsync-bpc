@@ -3,7 +3,7 @@
  * Written by Jay Fenlason, vaguely based on the ACLs patch.
  *
  * Copyright (C) 2004 Red Hat, Inc.
- * Copyright (C) 2006-2015 Wayne Davison
+ * Copyright (C) 2006-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,6 +37,7 @@ extern int preserve_links;
 extern int preserve_devices;
 extern int preserve_specials;
 extern int checksum_seed;
+extern int saw_xattr_filter;
 
 #define RSYNC_XAL_INITIAL 5
 #define RSYNC_XAL_LIST_INITIAL 100
@@ -79,11 +80,28 @@ typedef struct {
 	int num;
 } rsync_xa;
 
+struct _rsync_xa_list;
+
+typedef struct _rsync_xa_list_ref {
+	struct _rsync_xa_list_ref *next;
+	int ndx;
+} rsync_xa_list_ref;
+
+typedef struct _rsync_xa_list {
+	int ndx;
+	int64 key;
+	item_list xa_items;
+} rsync_xa_list;
+
 static size_t namebuf_len = 0;
 static char *namebuf = NULL;
 
-static item_list empty_xattr = EMPTY_ITEM_LIST;
+static const rsync_xa_list empty_xa_list = {
+	.xa_items = EMPTY_ITEM_LIST,
+};
+static const item_list empty_xattr = EMPTY_ITEM_LIST;
 static item_list rsync_xal_l = EMPTY_ITEM_LIST;
+static struct hashtable *rsync_xal_h = NULL;
 
 static size_t prior_xattr_count = (size_t)-1;
 
@@ -144,7 +162,7 @@ static ssize_t get_xattr_names(const char *fname)
 			arg = namebuf_len;
 		  got_error:
 			rsyserr(FERROR_XFER, errno,
-				"get_xattr_names: llistxattr(\"%s\",%s) failed",
+				"get_xattr_names: llistxattr(%s,%s) failed",
 				full_fname(fname), big_num(arg));
 			return -1;
 		}
@@ -180,7 +198,7 @@ static char *get_xattr_data(const char *fname, const char *name, size_t *len_ptr
 		if (errno == ENOTSUP || no_missing_error)
 			return NULL;
 		rsyserr(FERROR_XFER, errno,
-			"get_xattr_data: lgetxattr(\"%s\",\"%s\",0) failed",
+			"get_xattr_data: lgetxattr(%s,\"%s\",0) failed",
 			full_fname(fname), name);
 		return NULL;
 	}
@@ -197,12 +215,12 @@ static char *get_xattr_data(const char *fname, const char *name, size_t *len_ptr
 		if (len != datum_len) {
 			if (len == (size_t)-1) {
 				rsyserr(FERROR_XFER, errno,
-				    "get_xattr_data: lgetxattr(\"%s\",\"%s\",%ld)"
-				    " failed", full_fname(fname), name, (long)datum_len);
+				    "get_xattr_data: lgetxattr(%s,\"%s\",%ld) failed",
+				    full_fname(fname), name, (long)datum_len);
 			} else {
 				rprintf(FERROR_XFER,
-				    "get_xattr_data: lgetxattr(\"%s\",\"%s\",%ld)"
-				    " returned %ld\n", full_fname(fname), name,
+				    "get_xattr_data: lgetxattr(%s,\"%s\",%ld) returned %ld\n",
+				    full_fname(fname), name,
 				    (long)datum_len, (long)len);
 			}
 			free(ptr);
@@ -232,17 +250,18 @@ static int rsync_xal_get(const char *fname, item_list *xalp)
 		name_len = strlen(name) + 1;
 		list_len -= name_len;
 
+		if (saw_xattr_filter) {
+			if (name_is_excluded(name, NAME_IS_XATTR, ALL_FILTERS))
+				continue;
+		}
 #ifdef HAVE_LINUX_XATTRS
-		/* We always ignore the system namespace, and non-root
-		 * ignores everything but the user namespace. */
-		if (user_only ? !HAS_PREFIX(name, USER_PREFIX)
-			      : HAS_PREFIX(name, SYSTEM_PREFIX))
+		/* Choose between ignoring the system namespace or (non-root) ignoring any non-user namespace. */
+		else if (user_only ? !HAS_PREFIX(name, USER_PREFIX) : HAS_PREFIX(name, SYSTEM_PREFIX))
 			continue;
 #endif
 
 		/* No rsync.%FOO attributes are copied w/o 2 -X options. */
-		if (name_len > RPRE_LEN && name[RPRE_LEN] == '%'
-		 && HAS_PREFIX(name, RSYNC_PREFIX)) {
+		if (name_len > RPRE_LEN && name[RPRE_LEN] == '%' && HAS_PREFIX(name, RSYNC_PREFIX)) {
 			if ((am_sender && preserve_xattrs < 2)
 			 || (am_root < 0
 			  && (strcmp(name+RPRE_LEN+1, XSTAT_SUFFIX) == 0
@@ -258,7 +277,7 @@ static int rsync_xal_get(const char *fname, item_list *xalp)
 		if (datum_len > MAX_FULL_DATUM) {
 			/* For large datums, we store a flag and a checksum. */
 			name_offset = 1 + MAX_DIGEST_LEN;
-			sum_init(checksum_seed);
+			sum_init(-1, checksum_seed);
 			sum_update(ptr, datum_len);
 			free(ptr);
 
@@ -335,11 +354,13 @@ int copy_xattrs(const char *source, const char *dest)
 		name_len = strlen(name) + 1;
 		list_len -= name_len;
 
+		if (saw_xattr_filter) {
+			if (name_is_excluded(name, NAME_IS_XATTR, ALL_FILTERS))
+				continue;
+		}
 #ifdef HAVE_LINUX_XATTRS
-		/* We always ignore the system namespace, and non-root
-		 * ignores everything but the user namespace. */
-		if (user_only ? !HAS_PREFIX(name, USER_PREFIX)
-			      : HAS_PREFIX(name, SYSTEM_PREFIX))
+		/* Choose between ignoring the system namespace or (non-root) ignoring any non-user namespace. */
+		else if (user_only ? !HAS_PREFIX(name, USER_PREFIX) : HAS_PREFIX(name, SYSTEM_PREFIX))
 			continue;
 #endif
 
@@ -349,7 +370,7 @@ int copy_xattrs(const char *source, const char *dest)
 		if (sys_lsetxattr(dest, name, ptr, datum_len) < 0) {
 			int save_errno = errno ? errno : EINVAL;
 			rsyserr(FERROR_XFER, errno,
-				"copy_xattrs: lsetxattr(\"%s\",\"%s\") failed",
+				"copy_xattrs: lsetxattr(%s,\"%s\") failed",
 				full_fname(dest), name);
 			errno = save_errno;
 			return -1;
@@ -360,17 +381,58 @@ int copy_xattrs(const char *source, const char *dest)
 	return 0;
 }
 
-static int find_matching_xattr(item_list *xalp)
+static int64 xattr_lookup_hash(const item_list *xalp)
 {
-	size_t i, j;
-	item_list *lst = rsync_xal_l.items;
+	const rsync_xa *rxas = xalp->items;
+	size_t i;
+	int64 key = hashlittle(&xalp->count, sizeof xalp->count);
 
-	for (i = 0; i < rsync_xal_l.count; i++) {
-		rsync_xa *rxas1 = lst[i].items;
-		rsync_xa *rxas2 = xalp->items;
+	for (i = 0; i < xalp->count; i++) {
+		key += hashlittle(rxas[i].name, rxas[i].name_len);
+		if (rxas[i].datum_len > MAX_FULL_DATUM)
+			key += hashlittle(rxas[i].datum, MAX_DIGEST_LEN);
+		else
+			key += hashlittle(rxas[i].datum, rxas[i].datum_len);
+	}
+
+	if (key == 0) {
+		/* This is very unlikely, but we should never
+		 * return 0 as hashtable_find() doesn't like it. */
+		return 1;
+	}
+
+	return key;
+}
+
+static int find_matching_xattr(const item_list *xalp)
+{
+	const struct ht_int64_node *node;
+	const rsync_xa_list_ref *ref;
+	int64 key;
+
+	if (rsync_xal_h == NULL)
+		return -1;
+
+	key = xattr_lookup_hash(xalp);
+
+	node = hashtable_find(rsync_xal_h, key, 0);
+	if (node == NULL)
+		return -1;
+
+	if (node->data == NULL)
+		return -1;
+
+	for (ref = node->data; ref != NULL; ref = ref->next) {
+		const rsync_xa_list *ptr = rsync_xal_l.items;
+		const rsync_xa *rxas1;
+		const rsync_xa *rxas2 = xalp->items;
+		size_t j;
+
+		ptr += ref->ndx;
+		rxas1 = ptr->xa_items.items;
 
 		/* Wrong number of elements? */
-		if (lst[i].count != xalp->count)
+		if (ptr->xa_items.count != xalp->count)
 			continue;
 		/* any elements different? */
 		for (j = 0; j < xalp->count; j++) {
@@ -391,23 +453,61 @@ static int find_matching_xattr(item_list *xalp)
 		}
 		/* no differences found.  This is The One! */
 		if (j == xalp->count)
-			return i;
+			return ref->ndx;
 	}
 
 	return -1;
 }
 
 /* Store *xalp on the end of rsync_xal_l */
-static void rsync_xal_store(item_list *xalp)
+static int rsync_xal_store(item_list *xalp)
 {
-	item_list *new_lst = EXPAND_ITEM_LIST(&rsync_xal_l, item_list, RSYNC_XAL_LIST_INITIAL);
+	struct ht_int64_node *node;
+	int ndx = rsync_xal_l.count; /* pre-incremented count */
+	rsync_xa_list *new_list = EXPAND_ITEM_LIST(&rsync_xal_l, rsync_xa_list, RSYNC_XAL_LIST_INITIAL);
+	rsync_xa_list_ref *new_ref;
 	/* Since the following call starts a new list, we know it will hold the
 	 * entire initial-count, not just enough space for one new item. */
-	*new_lst = empty_xattr;
-	(void)EXPAND_ITEM_LIST(new_lst, rsync_xa, xalp->count);
-	memcpy(new_lst->items, xalp->items, xalp->count * sizeof (rsync_xa));
-	new_lst->count = xalp->count;
+	*new_list = empty_xa_list;
+	(void)EXPAND_ITEM_LIST(&new_list->xa_items, rsync_xa, xalp->count);
+	memcpy(new_list->xa_items.items, xalp->items, xalp->count * sizeof (rsync_xa));
+	new_list->xa_items.count = xalp->count;
 	xalp->count = 0;
+
+	new_list->ndx = ndx;
+	new_list->key = xattr_lookup_hash(&new_list->xa_items);
+
+	if (rsync_xal_h == NULL)
+		rsync_xal_h = hashtable_create(512, 1);
+	if (rsync_xal_h == NULL)
+		out_of_memory("rsync_xal_h hashtable_create()");
+
+	node = hashtable_find(rsync_xal_h, new_list->key, 1);
+	if (node == NULL)
+		out_of_memory("rsync_xal_h hashtable_find()");
+
+	new_ref = new0(rsync_xa_list_ref);
+	if (new_ref == NULL)
+		out_of_memory("new0(rsync_xa_list_ref)");
+
+	new_ref->ndx = ndx;
+
+	if (node->data != NULL) {
+		rsync_xa_list_ref *ref = node->data;
+
+		while (ref != NULL) {
+			if (ref->next != NULL) {
+				ref = ref->next;
+				continue;
+			}
+
+			ref->next = new_ref;
+			break;
+		}
+	} else
+		node->data = new_ref;
+
+	return ndx;
 }
 
 /* Send the make_xattr()-generated xattr list for this flist entry. */
@@ -454,8 +554,7 @@ int send_xattr(int f, stat_x *sxp)
 			else
 				write_bigbuf(f, rxa->datum, rxa->datum_len);
 		}
-		ndx = rsync_xal_l.count; /* pre-incremented count */
-		rsync_xal_store(sxp->xattr); /* adds item to rsync_xal_l */
+		ndx = rsync_xal_store(sxp->xattr); /* adds item to rsync_xal_l */
 	}
 
 	return ndx;
@@ -466,7 +565,8 @@ int send_xattr(int f, stat_x *sxp)
  * need so that send_xattr_request() can tell the sender about them. */
 int xattr_diff(struct file_struct *file, stat_x *sxp, int find_all)
 {
-	item_list *lst = rsync_xal_l.items;
+	const rsync_xa_list *glst = rsync_xal_l.items;
+	const item_list *lst;
 	rsync_xa *snd_rxa, *rec_rxa;
 	int snd_cnt, rec_cnt;
 	int cmp, same, xattrs_equal = 1;
@@ -479,9 +579,10 @@ int xattr_diff(struct file_struct *file, stat_x *sxp, int find_all)
 		rec_cnt = 0;
 	}
 
-	if (F_XATTR(file) >= 0)
-		lst += F_XATTR(file);
-	else
+	if (F_XATTR(file) >= 0) {
+		glst += F_XATTR(file);
+		lst = &glst->xa_items;
+	} else
 		lst = &empty_xattr;
 
 	snd_rxa = lst->items;
@@ -540,11 +641,14 @@ int xattr_diff(struct file_struct *file, stat_x *sxp, int find_all)
  * XSTATE_ABBREV states into XSTATE_DONE. */
 void send_xattr_request(const char *fname, struct file_struct *file, int f_out)
 {
-	item_list *lst = rsync_xal_l.items;
+	const rsync_xa_list *glst = rsync_xal_l.items;
+	const item_list *lst;
 	int cnt, prior_req = 0;
 	rsync_xa *rxa;
 
-	lst += F_XATTR(file);
+	glst += F_XATTR(file);
+	lst = &glst->xa_items;
+
 	for (rxa = lst->items, cnt = lst->count; cnt--; rxa++) {
 		if (rxa->datum_len <= MAX_FULL_DATUM)
 			continue;
@@ -595,7 +699,8 @@ void send_xattr_request(const char *fname, struct file_struct *file, int f_out)
  * stores it in place of its checksum. */
 int recv_xattr_request(struct file_struct *file, int f_in)
 {
-	item_list *lst = rsync_xal_l.items;
+	const rsync_xa_list *glst = rsync_xal_l.items;
+	const item_list *lst;
 	char *old_datum, *name;
 	rsync_xa *rxa;
 	int rel_pos, cnt, num, got_xattr_data = 0;
@@ -604,17 +709,40 @@ int recv_xattr_request(struct file_struct *file, int f_in)
 		rprintf(FERROR, "recv_xattr_request: internal data error!\n");
 		exit_cleanup(RERR_PROTOCOL);
 	}
-	lst += F_XATTR(file);
+	glst += F_XATTR(file);
+	lst = &glst->xa_items;
 
 	cnt = lst->count;
 	rxa = lst->items;
 	num = 0;
 	while ((rel_pos = read_varint(f_in)) != 0) {
 		num += rel_pos;
-		/* Note that the sender-related num values may not be in order on the receiver! */
-		while (cnt && (am_sender ? rxa->num < num : rxa->num != num)) {
-			rxa++;
-			cnt--;
+		if (am_sender) {
+			/* The sender-related num values are only in order on the sender.
+			 * We use that order here to scan foward or backward as needed. */
+			if (rel_pos < 0) {
+				while (cnt < (int)lst->count && rxa->num > num) {
+					rxa--;
+					cnt++;
+				}
+			} else {
+				while (cnt > 1 && rxa->num < num) {
+					rxa++;
+					cnt--;
+				}
+			}
+		} else {
+			int j;
+			/* The receiving side has no known num order, so we just scan
+			 * forward (w/wrap) and hope that the next value is near by. */
+			for (j = lst->count; j > 1 && rxa->num != num; j--) {
+				if (--cnt)
+					rxa++;
+				else {
+					cnt = lst->count;
+					rxa = lst->items;
+				}
+			}
 		}
 		if (!cnt || rxa->num != num) {
 			rprintf(FERROR, "[%s] could not find xattr #%d for %s\n",
@@ -689,23 +817,34 @@ void receive_xattr(int f, struct file_struct *file)
 		size_t dget_len = datum_len > MAX_FULL_DATUM ? 1 + MAX_DIGEST_LEN : datum_len;
 		size_t extra_len = MIGHT_NEED_RPRE ? RPRE_LEN : 0;
 		if ((dget_len + extra_len < dget_len)
-		 || (dget_len + extra_len + name_len < dget_len))
+		 || (dget_len + extra_len + name_len < dget_len + extra_len))
 			overflow_exit("receive_xattr");
 		ptr = new_array(char, dget_len + extra_len + name_len);
 		if (!ptr)
 			out_of_memory("receive_xattr");
 		name = ptr + dget_len + extra_len;
 		read_buf(f, name, name_len);
+		if (name_len < 1 || name[name_len-1] != '\0') {
+			rprintf(FERROR, "Invalid xattr name received (missing trailing \\0).\n");
+			exit_cleanup(RERR_FILEIO);
+		}
 		if (dget_len == datum_len)
 			read_buf(f, ptr, dget_len);
 		else {
 			*ptr = XSTATE_ABBREV;
 			read_buf(f, ptr + 1, MAX_DIGEST_LEN);
 		}
+
+		if (saw_xattr_filter) {
+			if (name_is_excluded(name, NAME_IS_XATTR, ALL_FILTERS)) {
+				free(ptr);
+				continue;
+			}
+		}
 #ifdef HAVE_LINUX_XATTRS
 		/* Non-root can only save the user namespace. */
 		if (am_root <= 0 && !HAS_PREFIX(name, USER_PREFIX)) {
-			if (!am_root) {
+			if (!am_root && !saw_xattr_filter) {
 				free(ptr);
 				continue;
 			}
@@ -736,6 +875,7 @@ void receive_xattr(int f, struct file_struct *file)
 			free(ptr);
 			continue;
 		}
+
 		rxa = EXPAND_ITEM_LIST(&temp_xattr, rsync_xa, 1);
 		rxa->name = name;
 		rxa->datum = ptr;
@@ -747,8 +887,7 @@ void receive_xattr(int f, struct file_struct *file)
 	if (need_sort && count > 1)
 		qsort(temp_xattr.items, count, sizeof (rsync_xa), rsync_xal_compare_names);
 
-	ndx = rsync_xal_l.count; /* pre-incremented count */
-	rsync_xal_store(&temp_xattr); /* adds item to rsync_xal_l */
+	ndx = rsync_xal_store(&temp_xattr); /* adds item to rsync_xal_l */
 
 	F_XATTR(file) = ndx;
 }
@@ -774,12 +913,47 @@ void cache_tmp_xattr(struct file_struct *file, stat_x *sxp)
 void uncache_tmp_xattrs(void)
 {
 	if (prior_xattr_count != (size_t)-1) {
-		item_list *xattr_item = rsync_xal_l.items;
-		item_list *xattr_start = xattr_item + prior_xattr_count;
-		xattr_item += rsync_xal_l.count;
+		rsync_xa_list *xa_list_item = rsync_xal_l.items;
+		rsync_xa_list *xa_list_start = xa_list_item + prior_xattr_count;
+		xa_list_item += rsync_xal_l.count;
 		rsync_xal_l.count = prior_xattr_count;
-		while (xattr_item-- > xattr_start)
-			rsync_xal_free(xattr_item);
+		while (xa_list_item-- > xa_list_start) {
+			struct ht_int64_node *node;
+			rsync_xa_list_ref *ref;
+
+			rsync_xal_free(&xa_list_item->xa_items);
+
+			if (rsync_xal_h == NULL)
+				continue;
+
+			node = hashtable_find(rsync_xal_h, xa_list_item->key, 0);
+			if (node == NULL)
+				continue;
+
+			if (node->data == NULL)
+				continue;
+
+			ref = node->data;
+			if (xa_list_item->ndx == ref->ndx) {
+				/* xa_list_item is the first in the list. */
+				node->data = ref->next;
+				free(ref);
+				continue;
+			}
+
+			while (ref != NULL) {
+				if (ref->next == NULL) {
+					ref = NULL;
+					break;
+				}
+				if (xa_list_item->ndx == ref->next->ndx) {
+					ref->next = ref->next->next;
+					free(ref);
+					break;
+				}
+				ref = ref->next;
+			}
+		}
 		prior_xattr_count = (size_t)-1;
 	}
 }
@@ -805,6 +979,7 @@ static int rsync_xal_set(const char *fname, item_list *xalp,
 		name = rxas[i].name;
 
 		if (XATTR_ABBREV(rxas[i])) {
+			int sum_len;
 			/* See if the fnamecmp version is identical. */
 			len = name_len = rxas[i].name_len;
 			if ((ptr = get_xattr_data(fnamecmp, name, &len, 1)) == NULL) {
@@ -821,10 +996,10 @@ static int rsync_xal_set(const char *fname, item_list *xalp,
 				goto still_abbrev;
 			}
 
-			sum_init(checksum_seed);
+			sum_init(-1, checksum_seed);
 			sum_update(ptr, len);
-			sum_end(sum);
-			if (memcmp(sum, rxas[i].datum + 1, MAX_DIGEST_LEN) != 0) {
+			sum_len = sum_end(sum);
+			if (memcmp(sum, rxas[i].datum + 1, sum_len) != 0) {
 				free(ptr);
 				goto still_abbrev;
 			}
@@ -833,7 +1008,7 @@ static int rsync_xal_set(const char *fname, item_list *xalp,
 				; /* Value is already set when identical */
 			else if (sys_lsetxattr(fname, name, ptr, len) < 0) {
 				rsyserr(FERROR_XFER, errno,
-					"rsync_xal_set: lsetxattr(\"%s\",\"%s\") failed",
+					"rsync_xal_set: lsetxattr(%s,\"%s\") failed",
 					full_fname(fname), name);
 				ret = -1;
 			} else /* make sure caller sets mtime */
@@ -854,7 +1029,7 @@ static int rsync_xal_set(const char *fname, item_list *xalp,
 
 		if (sys_lsetxattr(fname, name, rxas[i].datum, rxas[i].datum_len) < 0) {
 			rsyserr(FERROR_XFER, errno,
-				"rsync_xal_set: lsetxattr(\"%s\",\"%s\") failed",
+				"rsync_xal_set: lsetxattr(%s,\"%s\") failed",
 				full_fname(fname), name);
 			ret = -1;
 		} else /* make sure caller sets mtime */
@@ -866,15 +1041,16 @@ static int rsync_xal_set(const char *fname, item_list *xalp,
 		name_len = strlen(name) + 1;
 		list_len -= name_len;
 
+		if (saw_xattr_filter) {
+			if (name_is_excluded(name, NAME_IS_XATTR, ALL_FILTERS))
+				continue;
+		}
 #ifdef HAVE_LINUX_XATTRS
-		/* We always ignore the system namespace, and non-root
-		 * ignores everything but the user namespace. */
-		if (user_only ? !HAS_PREFIX(name, USER_PREFIX)
-			      : HAS_PREFIX(name, SYSTEM_PREFIX))
+		/* Choose between ignoring the system namespace or (non-root) ignoring any non-user namespace. */
+		else if (user_only ? !HAS_PREFIX(name, USER_PREFIX) : HAS_PREFIX(name, SYSTEM_PREFIX))
 			continue;
 #endif
-		if (am_root < 0 && name_len > RPRE_LEN
-		 && name[RPRE_LEN] == '%' && strcmp(name, XSTAT_ATTR) == 0)
+		if (am_root < 0 && name_len > RPRE_LEN && name[RPRE_LEN] == '%' && strcmp(name, XSTAT_ATTR) == 0)
 			continue;
 
 		for (i = 0; i < xalp->count; i++) {
@@ -884,7 +1060,7 @@ static int rsync_xal_set(const char *fname, item_list *xalp,
 		if (i == xalp->count) {
 			if (sys_lremovexattr(fname, name) < 0) {
 				rsyserr(FERROR_XFER, errno,
-					"rsync_xal_set: lremovexattr(\"%s\",\"%s\") failed",
+					"rsync_xal_set: lremovexattr(%s,\"%s\") failed",
 					full_fname(fname), name);
 				ret = -1;
 			} else /* make sure caller sets mtime */
@@ -899,8 +1075,9 @@ static int rsync_xal_set(const char *fname, item_list *xalp,
 int set_xattr(const char *fname, const struct file_struct *file,
 	      const char *fnamecmp, stat_x *sxp)
 {
+	rsync_xa_list *glst = rsync_xal_l.items;
+	item_list *lst;
 	int ndx;
-	item_list *lst = rsync_xal_l.items;
 
 	if (dry_run)
 		return 1; /* FIXME: --dry-run needs to compute this value */
@@ -930,7 +1107,9 @@ int set_xattr(const char *fname, const struct file_struct *file,
 #endif
 
 	ndx = F_XATTR(file);
-	return rsync_xal_set(fname, lst + ndx, fnamecmp, sxp);
+	glst += ndx;
+	lst = &glst->xa_items;
+	return rsync_xal_set(fname, lst, fnamecmp, sxp);
 }
 
 #ifdef SUPPORT_ACLS
@@ -946,7 +1125,7 @@ int set_xattr_acl(const char *fname, int is_access_acl, const char *buf, size_t 
 	const char *name = is_access_acl ? XACC_ACL_ATTR : XDEF_ACL_ATTR;
 	if (sys_lsetxattr(fname, name, buf, buf_len) < 0) {
 		rsyserr(FERROR_XFER, errno,
-			"set_xattr_acl: lsetxattr(\"%s\",\"%s\") failed",
+			"set_xattr_acl: lsetxattr(%s,\"%s\") failed",
 			full_fname(fname), name);
 		return -1;
 	}

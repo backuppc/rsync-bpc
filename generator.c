@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -74,7 +74,7 @@ extern int protocol_version;
 extern int file_total;
 extern int fuzzy_basis;
 extern int always_checksum;
-extern int checksum_len;
+extern int flist_csum_len;
 extern char *partial_dir;
 extern int compare_dest;
 extern int copy_dest;
@@ -99,6 +99,7 @@ extern struct file_list *cur_flist, *first_flist, *dir_flist;
 extern filter_rule_list filter_list, daemon_filter_list;
 
 int maybe_ATTRS_REPORT = 0;
+int maybe_ATTRS_SET_NANO = 0;
 
 static dev_t dev_zero;
 static int deldelay_size = 0, deldelay_cnt = 0;
@@ -382,9 +383,13 @@ static void do_delete_pass(void)
 		rprintf(FINFO, "                    \r");
 }
 
-static inline int time_differs(struct file_struct *file, stat_x *sxp)
+static inline int time_diff(STRUCT_STAT *stp, struct file_struct *file)
 {
-	return cmp_time(sxp->st.st_mtime, file->modtime);
+#ifdef ST_MTIME_NSEC
+	return cmp_time(stp->st_mtime, stp->ST_MTIME_NSEC, file->modtime, F_MOD_NSEC(file));
+#else
+	return cmp_time(stp->st_mtime, 0L, file->modtime, 0L);
+#endif
 }
 
 static inline int perms_differ(struct file_struct *file, stat_x *sxp)
@@ -450,7 +455,7 @@ int unchanged_attrs(const char *fname, struct file_struct *file, stat_x *sxp)
     */
 	if (S_ISLNK(file->mode)) {
 #ifdef CAN_SET_SYMLINK_TIMES
-		if (preserve_times & PRESERVE_LINK_TIMES && time_differs(file, sxp))
+		if (preserve_times & PRESERVE_LINK_TIMES && time_diff(&sxp->st, file))
 			return 0;
 #endif
 #ifdef CAN_CHMOD_SYMLINK
@@ -470,7 +475,7 @@ int unchanged_attrs(const char *fname, struct file_struct *file, stat_x *sxp)
 			return 0;
 #endif
 	} else {
-		if (preserve_times && time_differs(file, sxp))
+		if (preserve_times && time_diff(&sxp->st, file))
 			return 0;
 		if (perms_differ(file, sxp))
 			return 0;
@@ -505,7 +510,7 @@ void itemize(const char *fnamecmp, struct file_struct *file, int ndx, int statre
 			if (iflags & ITEM_LOCAL_CHANGE)
 				iflags |= symlink_timeset_failed_flags;
 		} else if (keep_time
-		 ? cmp_time(file->modtime, sxp->st.st_mtime) != 0
+		 ? time_diff(&sxp->st, file)
 		 : iflags & (ITEM_TRANSFER|ITEM_LOCAL_CHANGE) && !(iflags & ITEM_MATCHED)
 		  && (!(iflags & ITEM_XNAME_FOLLOWS) || *xname))
 			iflags |= ITEM_REPORT_TIME;
@@ -604,7 +609,7 @@ int unchanged_file(char *fn, struct file_struct *file, STRUCT_STAT *st)
                                     sum[0] & 0xff, sum[1] & 0xff, sum[2] & 0xff, sum[3] & 0xff);
                 }
             */
-		if ( csumError || memcmp(sum, F_SUM(file), checksum_len) ) return 0;
+		if ( csumError || memcmp(sum, F_SUM(file), flist_csum_len) ) return 0;
 	}
 
 	if (size_only > 0) {
@@ -622,8 +627,8 @@ int unchanged_file(char *fn, struct file_struct *file, STRUCT_STAT *st)
 		return 0;
 	}
 
-        /* fprintf(stderr, "unchanged_file(%s): returning cmd_time(%ld, %ld)\n", fn, st->st_mtime, file->modtime); */
-	return cmp_time(st->st_mtime, file->modtime) == 0;
+        /* fprintf(stderr, "unchanged_file(%s): returning time_diff(%ld, %ld)\n", fn, st->st_mtime, file->modtime); */
+	return time_diff(st, file) == 0;
 }
 
 
@@ -800,7 +805,7 @@ static struct file_struct *find_fuzzy(struct file_struct *file, struct file_list
 			if (!S_ISREG(fp->mode) || !F_LENGTH(fp) || fp->flags & FLAG_FILE_SENT)
 				continue;
 
-			if (F_LENGTH(fp) == F_LENGTH(file) && cmp_time(fp->modtime, file->modtime) == 0) {
+			if (F_LENGTH(fp) == F_LENGTH(file) && cmp_time(fp->modtime, 0L, file->modtime, 0L) == 0) {
 				if (DEBUG_GTE(FUZZY, 2))
 					rprintf(FINFO, "fuzzy size/modtime match for %s\n", f_name(fp, NULL));
 				*fnamecmp_type_ptr = FNAMECMP_FUZZY + i;
@@ -1246,6 +1251,8 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		return;
 	}
 
+	maybe_ATTRS_SET_NANO = always_checksum ? ATTRS_SET_NANO : 0;
+
 	if (skip_dir) {
 		if (is_below(file, skip_dir)) {
 			if (is_dir)
@@ -1298,7 +1305,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			 * this function was asked to process in the file list. */
 			if (!inc_recurse
 			 && (*dn != '.' || dn[1]) /* Avoid an issue with --relative and the "." dir. */
-			 && (prior_dir_file && strcmp(dn, f_name(prior_dir_file, NULL)) != 0)
+			 && (!prior_dir_file || strcmp(dn, f_name(prior_dir_file, NULL)) != 0)
 			 && flist_find_name(cur_flist, dn, 1) < 0) {
 				rprintf(FERROR,
 					"ABORTING due to invalid path from sender: %s/%s\n",
@@ -1734,8 +1741,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		goto cleanup;
 	}
 
-	if (update_only > 0 && statret == 0
-	    && cmp_time(sx.st.st_mtime, file->modtime) > 0) {
+	if (update_only > 0 && statret == 0 && time_diff(&sx.st, file) > 0) {
 		if (INFO_GTE(SKIP, 1))
 			rprintf(FINFO, "%s is newer\n", fname);
 #ifdef SUPPORT_HARD_LINKS
@@ -1813,14 +1819,14 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 
 	if (fnamecmp_type <= FNAMECMP_BASIS_DIR_HIGH)
 		;
-	else if (fnamecmp_type == FNAMECMP_FUZZY)
+	else if (fnamecmp_type >= FNAMECMP_FUZZY)
 		;
 	else if (!skip_unchanged_check && unchanged_file(fnamecmp, file, &sx.st)) {
 		if (partialptr) {
 			do_unlink(partialptr);
 			handle_partial_dir(partialptr, PDIR_DELETE);
 		}
-		set_file_attrs(fname, file, &sx, NULL, maybe_ATTRS_REPORT);
+		set_file_attrs(fname, file, &sx, NULL, maybe_ATTRS_REPORT | maybe_ATTRS_SET_NANO);
 		if (itemizing)
 			itemize(fnamecmp, file, ndx, statret, &sx, 0, 0, NULL);
 #ifdef SUPPORT_HARD_LINKS
@@ -2129,8 +2135,7 @@ static void touch_up_dirs(struct file_list *flist, int ndx)
 			do_chmod(fname, file->mode);
 		if (need_retouch_dir_times) {
 			STRUCT_STAT st;
-			if (link_stat(fname, &st, 0) == 0
-			 && cmp_time(st.st_mtime, file->modtime) != 0)
+			if (link_stat(fname, &st, 0) == 0 && time_diff(&st, file))
 				set_modtime(fname, file->modtime, F_MOD_NSEC(file), file->mode);
 		}
 		if (counter >= loopchk_limit) {

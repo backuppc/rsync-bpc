@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -128,6 +128,16 @@ int set_modtime(const char *fname, time_t modtime, uint32 mod_nsec, mode_t mode)
 	}
 
 	switch (switch_step) {
+#ifdef HAVE_SETATTRLIST
+#include "case_N.h"
+		if (do_setattrlist_times(fname, modtime, mod_nsec) == 0)
+			break;
+		if (errno != ENOSYS)
+			return -1;
+		switch_step++;
+		/* FALLTHROUGH */
+#endif
+
 #ifdef HAVE_UTIMENSAT
 #include "case_N.h"
 		if (do_utimensat(fname, modtime, mod_nsec) == 0)
@@ -323,9 +333,7 @@ int copy_file(const char *source, const char *dest, int ofd, mode_t mode)
 	int ifd;
 	char buf[1024 * 8];
 	int len;   /* Number of bytes read into `buf'. */
-#ifdef PREALLOCATE_NEEDS_TRUNCATE
-	OFF_T preallocated_len = 0, offset = 0;
-#endif
+	OFF_T prealloc_len = 0, offset = 0;
 
 	if ((ifd = do_open(source, O_RDONLY, 0)) < 0) {
 		int save_errno = errno;
@@ -365,11 +373,8 @@ int copy_file(const char *source, const char *dest, int ofd, mode_t mode)
 		if (do_fstat(ifd, &srcst) < 0)
 			rsyserr(FWARNING, errno, "fstat %s", full_fname(source));
 		else if (srcst.st_size > 0) {
-			if (do_fallocate(ofd, 0, srcst.st_size) == 0) {
-#ifdef PREALLOCATE_NEEDS_TRUNCATE
-				preallocated_len = srcst.st_size;
-#endif
-			} else
+			prealloc_len = do_fallocate(ofd, 0, srcst.st_size);
+			if (prealloc_len < 0)
 				rsyserr(FWARNING, errno, "do_fallocate %s", full_fname(dest));
 		}
 	}
@@ -384,9 +389,7 @@ int copy_file(const char *source, const char *dest, int ofd, mode_t mode)
 			errno = save_errno;
 			return -1;
 		}
-#ifdef PREALLOCATE_NEEDS_TRUNCATE
 		offset += len;
-#endif
 	}
 
 	if (len < 0) {
@@ -403,15 +406,13 @@ int copy_file(const char *source, const char *dest, int ofd, mode_t mode)
 			full_fname(source));
 	}
 
-#ifdef PREALLOCATE_NEEDS_TRUNCATE
 	/* Source file might have shrunk since we fstatted it.
 	 * Cut off any extra preallocated zeros from dest file. */
-	if (offset < preallocated_len && do_ftruncate(ofd, offset) < 0) {
+	if (offset < prealloc_len && do_ftruncate(ofd, offset) < 0) {
 		/* If we fail to truncate, the dest file may be wrong, so we
 		 * must trigger the "partial transfer" error. */
 		rsyserr(FERROR_XFER, errno, "ftruncate %s", full_fname(dest));
 	}
-#endif
 
 	if (bpc_close(ofd) < 0) {
 		int save_errno = errno;
@@ -800,6 +801,41 @@ void strlower(char *s)
 	}
 }
 
+/**
+ * Split a string into tokens based (usually) on whitespace & commas.  If the
+ * string starts with a comma (after skipping any leading whitespace), then
+ * splitting is done only on commas. No empty tokens are ever returned. */
+char *conf_strtok(char *str)
+{
+	static int commas_only = 0;
+
+	if (str) {
+		while (isSpace(str)) str++;
+		if (*str == ',') {
+			commas_only = 1;
+			str++;
+		} else
+			commas_only = 0;
+	}
+
+	while (commas_only) {
+		char *end, *tok = strtok(str, ",");
+		if (!tok)
+			return NULL;
+		/* Trim just leading and trailing whitespace. */
+		while (isSpace(tok))
+			tok++;
+		end = tok + strlen(tok);
+		while (end > tok && isSpace(end-1))
+			*--end = '\0';
+		if (*tok)
+			return tok;
+		str = NULL;
+	}
+
+	return strtok(str, " ,\t\r\n");
+}
+
 /* Join strings p1 & p2 into "dest" with a guaranteed '/' between them.  (If
  * p1 ends with a '/', no extra '/' is inserted.)  Returns the length of both
  * strings + 1 (if '/' was inserted), regardless of whether the null-terminated
@@ -973,7 +1009,7 @@ char *sanitize_path(char *dest, const char *p, const char *rootdir, int depth,
 	int rlen = 0, drop_dot_dirs = !relative_paths || !(flags & SP_KEEP_DOT_DIRS);
 
 	if (dest != p) {
-		int plen = strlen(p);
+		int plen = strlen(p); /* the path len INCLUDING any separating slash */
 		if (*p == '/') {
 			if (!rootdir)
 				rootdir = module_dir;
@@ -984,11 +1020,11 @@ char *sanitize_path(char *dest, const char *p, const char *rootdir, int depth,
 		if (dest) {
 			if (rlen + plen + 1 >= MAXPATHLEN)
 				return NULL;
-		} else if (!(dest = new_array(char, rlen + plen + 1)))
+		} else if (!(dest = new_array(char, MAX(rlen + plen + 1, 2))))
 			out_of_memory("sanitize_path");
-		if (rlen) {
+		if (rlen) { /* only true if p previously started with a slash */
 			memcpy(dest, rootdir, rlen);
-			if (rlen > 1)
+			if (rlen > 1) /* a rootdir of len 1 is "/", so this avoids a 2nd slash */
 				dest[rlen++] = '/';
 		}
 	}
@@ -1321,15 +1357,20 @@ char *timestring(time_t t)
  *
  * @retval -1 if the 2nd is later
  **/
-int cmp_time(time_t file1, time_t file2)
+int cmp_time(time_t f1_sec, unsigned long f1_nsec, time_t f2_sec, unsigned long f2_nsec)
 {
-	if (file2 > file1) {
+	if (f2_sec > f1_sec) {
 		/* The final comparison makes sure that modify_window doesn't overflow a
-		 * time_t, which would mean that file2 must be in the equality window. */
-		if (!modify_window || (file2 > file1 + modify_window && file1 + modify_window > file1))
+		 * time_t, which would mean that f2_sec must be in the equality window. */
+		if (modify_window <= 0 || (f2_sec > f1_sec + modify_window && f1_sec + modify_window > f1_sec))
 			return -1;
-	} else if (file1 > file2) {
-		if (!modify_window || (file1 > file2 + modify_window && file2 + modify_window > file2))
+	} else if (f1_sec > f2_sec) {
+		if (modify_window <= 0 || (f1_sec > f2_sec + modify_window && f2_sec + modify_window > f2_sec))
+			return 1;
+	} else if (modify_window < 0) {
+		if (f2_nsec > f1_nsec)
+			return -1;
+		else if (f1_nsec > f2_nsec)
 			return 1;
 	}
 	return 0;

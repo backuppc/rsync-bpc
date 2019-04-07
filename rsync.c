@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -49,6 +49,7 @@ extern int flist_eof;
 extern int file_old_total;
 extern int keep_dirlinks;
 extern int make_backups;
+extern int sanitize_paths;
 extern struct file_list *cur_flist, *first_flist, *dir_flist;
 extern struct chmod_mode_struct *daemon_chmod_modes;
 #ifdef ICONV_OPTION
@@ -396,6 +397,11 @@ int read_ndx_and_attrs(int f_in, int f_out, int *iflag_ptr, uchar *type_ptr,
 	if (iflags & ITEM_XNAME_FOLLOWS) {
 		if ((len = read_vstring(f_in, buf, MAXPATHLEN)) < 0)
 			exit_cleanup(RERR_PROTOCOL);
+
+		if (sanitize_paths) {
+			sanitize_path(buf, buf, "", 0, SP_DEFAULT);
+			len = strlen(buf);
+		}
 	} else {
 		*buf = '\0';
 		len = -1;
@@ -552,7 +558,7 @@ int set_file_attrs(const char *fname, struct file_struct *file, stat_x *sxp,
 	if (!(flags & ATTRS_SKIP_MTIME)
 	 && (sxp->st.st_mtime != file->modtime
 #ifdef ST_MTIME_NSEC
-	  || (NSEC_BUMP(file) && (uint32)sxp->st.ST_MTIME_NSEC != F_MOD_NSEC(file))
+	  || (flags & ATTRS_SET_NANO && NSEC_BUMP(file) && (uint32)sxp->st.ST_MTIME_NSEC != F_MOD_NSEC(file))
 #endif
 	  )) {
 		int ret = set_modtime(fname, file->modtime, F_MOD_NSEC(file), sxp->st.st_mode);
@@ -664,14 +670,14 @@ int finish_transfer(const char *fname, const char *fnametmp,
 	if (make_backups > 0 && overwriting_basis) {
 		int ok = make_backup(fname, False);
 		if (!ok)
-			return 1;
+			exit_cleanup(RERR_FILEIO);
 		if (ok == 1 && fnamecmp == fname)
 			fnamecmp = get_backup_name(fname);
 	}
 
 	/* Change permissions before putting the file into place. */
 	set_file_attrs(fnametmp, file, NULL, fnamecmp,
-		       ok_to_set_time ? 0 : ATTRS_SKIP_MTIME);
+		       ok_to_set_time ? ATTRS_SET_NANO : ATTRS_SKIP_MTIME);
 
 	/* move tmp file over real file */
 	if (DEBUG_GTE(RECV, 1))
@@ -696,7 +702,7 @@ int finish_transfer(const char *fname, const char *fnametmp,
 
   do_set_file_attrs:
 	set_file_attrs(fnametmp, file, NULL, fnamecmp,
-		       ok_to_set_time ? 0 : ATTRS_SKIP_MTIME);
+		       ok_to_set_time ? ATTRS_SET_NANO : ATTRS_SKIP_MTIME);
 
 	if (temp_copy_name) {
 		if (do_rename(fnametmp, fname) < 0) {

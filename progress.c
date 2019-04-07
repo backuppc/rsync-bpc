@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2015 Wayne Davison
+ * Copyright (C) 2003-2018 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,6 +25,7 @@
 
 extern int am_server;
 extern int flist_eof;
+extern int quiet;
 extern int need_unsorted_flist;
 extern int output_needs_newline;
 extern struct stats stats;
@@ -127,7 +128,7 @@ static void rprint_progress(OFF_T ofs, OFF_T size, struct timeval *now,
 	pct = ofs == size ? 100 : (int) (100.0 * ofs / size);
 	rprintf(FCLIENT, "\r%15s %3d%% %7.2f%s %s%s",
 		human_num(ofs), pct, rate, units, rembuf, eol);
-	if (!is_last) {
+	if (!is_last && !quiet) {
 		output_needs_newline = 1;
 		rflush(FCLIENT);
 	}

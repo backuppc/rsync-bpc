@@ -1,5 +1,5 @@
 mailto(rsync-bugs@samba.org)
-manpage(rsync)(1)(21 Dec 2015)()()
+manpage(rsync)(1)(28 Jan 2018)()()
 manpagename(rsync)(a fast, versatile, remote (and local) file-copying tool)
 manpagesynopsis()
 
@@ -376,10 +376,11 @@ to the detailed description below for a complete description.  verb(
  -J, --omit-link-times       omit symlinks from --times
      --super                 receiver attempts super-user activities
      --fake-super            store/recover privileged attrs using xattrs
- -S, --sparse                handle sparse files efficiently
+ -S, --sparse                turn sequences of nulls into sparse blocks
      --preallocate           allocate dest files before writing
  -n, --dry-run               perform a trial run with no changes made
  -W, --whole-file            copy files whole (w/o delta-xfer algorithm)
+     --checksum-choice=STR   choose the checksum algorithms
  -x, --one-file-system       don't cross filesystem boundaries
  -B, --block-size=SIZE       force a fixed checksum block-size
  -e, --rsh=COMMAND           specify the remote shell to use
@@ -413,7 +414,7 @@ to the detailed description below for a complete description.  verb(
      --contimeout=SECONDS    set daemon connection timeout in seconds
  -I, --ignore-times          don't skip files that match size and time
      --size-only             skip files that match in size
-     --modify-window=NUM     compare mod-times with reduced accuracy
+ -@, --modify-window=NUM     set the accuracy for mod-time comparisons
  -T, --temp-dir=DIR          create temporary files in directory DIR
  -y, --fuzzy                 find similar file for basis if no dest file
      --compare-dest=DIR      also compare received files relative to DIR
@@ -493,7 +494,8 @@ command-line parsing.  Keep in mind that a leading tilde (~) in a filename is
 substituted by your shell, so --option=~/foo will not change the tilde into
 your home directory (remove the '=' for that).
 
-startdit()
+description(
+
 dit(bf(--help)) Print a short help page describing the options
 available in rsync and exit.  For backward-compatibility with older
 versions of rsync, the help will also be output if you use the bf(-h)
@@ -605,13 +607,23 @@ time to just looking for files that have changed in size.  This is useful
 when starting to use rsync after using another mirroring system which may
 not preserve timestamps exactly.
 
-dit(bf(--modify-window)) When comparing two timestamps, rsync treats the
+dit(bf(-@, --modify-window)) When comparing two timestamps, rsync treats the
 timestamps as being equal if they differ by no more than the modify-window
-value.  This is normally 0 (for an exact match), but you may find it useful
-to set this to a larger value in some situations.  In particular, when
-transferring to or from an MS Windows FAT filesystem (which represents
-times with a 2-second resolution), bf(--modify-window=1) is useful
-(allowing times to differ by up to 1 second).
+value.  The default is 0, which matches just integer seconds.  If you specify a
+negative value (and the receiver is at least version 3.1.3) then nanoseconds
+will also be taken into account.  Specifying 1 is useful for copies to/from MS
+Windows FAT filesystems, because FAT represents times with a 2-second
+resolution (allowing times to differ from the original by up to 1 second).
+
+If you want all your transfers to default to comparing nanoseconds, you can
+create a ~/.popt file and put these lines in it:
+
+quote(tt(   rsync alias -a -a@-1))
+quote(tt(   rsync alias -t -t@-1))
+
+With that as the default, you'd need to specify bf(--modify-window=0) (aka
+bf(-@0)) to override it and ignore nanoseconds, e.g. if you're copying between
+ext3 and ext4, or if the receiving rsync is older than 3.1.3.
 
 dit(bf(-c, --checksum)) This changes the way rsync checks if the files have
 been changed and are in need of a transfer.  Without this option, rsync
@@ -770,7 +782,7 @@ backup file goes and what (if any) suffix gets appended using the
 bf(--backup-dir) and bf(--suffix) options.
 
 Note that if you don't specify bf(--backup-dir), (1) the
-bf(--omit-dir-times) option will be implied, and (2) if bf(--delete) is
+bf(--omit-dir-times) option will be forced on, and (2) if bf(--delete) is
 also in effect (without bf(--delete-excluded)), rsync will add a "protect"
 filter-rule for the backup suffix to the end of all your existing excludes
 (e.g. bf(-f "P *~")).  This will prevent previously backed-up files from being
@@ -862,9 +874,7 @@ the same or longer than the size on the sender, the file is skipped.  This
 does not interfere with the updating of a file's non-content attributes
 (e.g. permissions, ownership, etc.) when the file does not need to be
 transferred, nor does it affect the updating of any non-regular files.
-Implies bf(--inplace),
-but does not conflict with bf(--sparse) (since it is always extending a
-file's length).
+Implies bf(--inplace).
 
 The use of bf(--append) can be dangerous if you aren't 100% sure that the files
 that are longer have only grown by the appending of data onto the end.  You
@@ -899,6 +909,9 @@ if you want to turn this off.
 There is also a backward-compatibility helper option, bf(--old-dirs) (or
 bf(--old-d)) that tells rsync to use a hack of "-r --exclude='/*/*'" to get
 an older rsync to list a single directory without recursing.
+
+)
+description(
 
 dit(bf(-l, --links)) When symlinks are encountered, recreate the
 symlink on the destination.
@@ -965,6 +978,9 @@ quote(tt(rsync -r --relative src/./ src/./follow-me/ dest/))
 This works because rsync calls bf(lstat)(2) on the source arg as given, and the
 trailing slash makes bf(lstat)(2) follow the symlink, giving rise to a directory
 in the file-list which overrides the symlink found during the scan of "src/./".
+
+)
+description(
 
 dit(bf(-K, --keep-dirlinks)) This option causes the receiving side to treat
 a symlink to a directory as though it were a real directory, but only if it
@@ -1109,9 +1125,27 @@ super-user copies all namespaces except system.*.  A normal user only copies
 the user.* namespace.  To be able to backup and restore non-user namespaces as
 a normal user, see the bf(--fake-super) option.
 
-Note that this option does not copy rsyncs special xattr values (e.g. those
-used by bf(--fake-super)) unless you repeat the option (e.g. -XX).  This
-"copy all xattrs" mode cannot be used with bf(--fake-super).
+The above name filtering can be overridden by using one or more filter options
+with the bf(x) modifier. When you specify an xattr-affecting filter rule, rsync
+requires that you do your own system/user filtering, as well as any additional
+filtering for what xattr names are copied and what names are allowed to be
+deleted.  For example, to skip the system namespace, you could specify:
+
+quote(--filter='-x system.*')
+
+To skip all namespaces except the user namespace, you could specify a
+negated-user match:
+
+quote(--filter='-x! user.*')
+
+To prevent any attributes from being deleted, you could specify a receiver-only
+rule that excludes all names:
+
+quote(--filter='-xr *')
+
+Note that the bf(-X) option does not copy rsync's special xattr values (e.g.
+those used by bf(--fake-super)) unless you repeat the option (e.g. -XX).
+This "copy all xattrs" mode cannot be used with bf(--fake-super).
 
 dit(bf(--chmod)) This option tells rsync to apply one or more
 comma-separated "chmod" modes to the permission of the files in the
@@ -1241,19 +1275,29 @@ This option is overridden by both bf(--super) and bf(--no-super).
 See also the "fake super" setting in the daemon's rsyncd.conf file.
 
 dit(bf(-S, --sparse)) Try to handle sparse files efficiently so they take
-up less space on the destination.  Conflicts with bf(--inplace) because it's
-not possible to overwrite data in a sparse fashion.
+up less space on the destination.  If combined with bf(--inplace) the
+file created might not end up with sparse blocks with some combinations
+of kernel version and/or filesystem type.  If bf(--whole-file) is in
+effect (e.g. for a local copy) then it will always work because rsync
+truncates the file prior to writing out the updated version.
+
+Note that versions of rsync older than 3.1.3 will reject the combination of
+bf(--sparse) and bf(--inplace).
 
 dit(bf(--preallocate)) This tells the receiver to allocate each destination
-file to its eventual size before writing data to the file.  Rsync will only use
-the real filesystem-level preallocation support provided by Linux's
+file to its eventual size before writing data to the file.  Rsync will only
+use the real filesystem-level preallocation support provided by Linux's
 bf(fallocate)(2) system call or Cygwin's bf(posix_fallocate)(3), not the slow
-glibc implementation that writes a zero byte into each block.
+glibc implementation that writes a null byte into each block.
 
 Without this option, larger files may not be entirely contiguous on the
 filesystem, but with this option rsync will probably copy more slowly.  If the
 destination is not an extent-supporting filesystem (such as ext4, xfs, NTFS,
 etc.), this option may have no positive effect at all.
+
+If combined with bf(--sparse), the file will only have sparse blocks (as
+opposed to allocated sequences of null bytes) if the kernel version and
+filesystem type support creating holes in the allocated data.
 
 dit(bf(-n, --dry-run)) This makes rsync perform a trial run that doesn't
 make any changes (and produces mostly the same output as a real run).  It
@@ -1270,13 +1314,26 @@ the "bytes sent", "bytes received", "literal data", and "matched data"
 statistics are too small, and the "speedup" value is equivalent to a run
 where no file transfers were needed.
 
-dit(bf(-W, --whole-file)) With this option rsync's delta-transfer algorithm
-is not used and the whole file is sent as-is instead.  The transfer may be
+dit(bf(-W, --whole-file)) This option disables rsync's delta-transfer algorithm,
+which causes all transferred files to be sent whole.  The transfer may be
 faster if this option is used when the bandwidth between the source and
 destination machines is higher than the bandwidth to disk (especially when the
 "disk" is actually a networked filesystem).  This is the default when both
 the source and destination are specified as local paths, but only if no
 batch-writing option is in effect.
+
+dit(bf(--checksum-choice=STR)) This option overrides the checksum algoriths.
+If one algorithm name is specified, it is used for both the transfer checksums
+and (assuming bf(--checksum) is specifed) the pre-transfer checksumming. If two
+comma-separated names are supplied, the first name affects the transfer
+checksums, and the second name affects the pre-transfer checksumming.
+
+The algorithm choices are "auto", "md4", "md5", and "none".  If "none" is
+specified for the first name, the bf(--whole-file) option is forced on and no
+checksum verification is performed on the transferred data.  If "none" is
+specified for the second name, the bf(--checksum) option cannot be used. The
+"auto" option is the default, where rsync bases its algorithm choice on the
+protocol version (for backward compatibility with older rsync versions).
 
 dit(bf(-x, --one-file-system)) This tells rsync to avoid crossing a
 filesystem boundary when recursing.  This does not limit the user's ability
@@ -1295,6 +1352,9 @@ If rsync has been told to collapse symlinks (via bf(--copy-links) or
 bf(--copy-unsafe-links)), a symlink to a directory on another device is
 treated like a mount-point.  Symlinks to non-directories are unaffected
 by this option.
+
+)
+description(
 
 dit(bf(--existing, --ignore-non-existing)) This tells rsync to skip
 creating files (including directories) that do not exist
@@ -1570,7 +1630,7 @@ When performing a local transfer, the "local" side is the sender and the
 
 Note some versions of the popt option-parsing library have a bug in them that
 prevents you from using an adjacent arg with an equal in it next to a short
-option letter (e.g. tt(-M--log-file=/tmp/foo).  If this bug affects your
+option letter (e.g. tt(-M--log-file=/tmp/foo)).  If this bug affects your
 version of popt, you can use the version of popt that is included with rsync.
 
 dit(bf(-C, --cvs-exclude)) This is a useful shorthand for excluding a
@@ -1719,6 +1779,9 @@ between adjacent entries.  If the input is not sorted, some path elements
 (implied directories) may end up being scanned multiple times, and rsync will
 eventually unduplicate them after they get turned into file-list elements.
 
+)
+description(
+
 dit(bf(-0, --from0)) This tells rsync that the rules/filenames it reads from a
 file are terminated by a null ('\0') character, not a NL, CR, or CR+LF.
 This affects bf(--exclude-from), bf(--include-from), bf(--files-from), and any
@@ -1855,7 +1918,7 @@ ownership (such as OS X's "Ignore ownership on this volume" option).
 
 Beginning in version 2.6.4, multiple bf(--link-dest) directories may be
 provided, which will cause rsync to search the list in the order specified
-for an exact match.
+for an exact match (there is a limit of 20 such directories).
 If a match is found that differs only in attributes, a local copy is made
 and the attributes updated.
 If a match is not found, a basis file from one of the em(DIR)s will be
@@ -2259,6 +2322,9 @@ and a hash (#), followed by exactly 3 octal digits.  For example, a newline
 would output as "\#012".  A literal backslash that is in a filename is not
 escaped unless it is followed by a hash and 3 digits (0-9).
 
+)
+description(
+
 dit(bf(-h, --human-readable)) Output numbers in a more human-readable format.
 There are 3 possible levels:  (1) output numbers with a separator between each
 set of 3 digits (either a comma or a period, depending on if the decimal point
@@ -2550,6 +2616,9 @@ file previously generated by bf(--write-batch).
 If em(FILE) is bf(-), the batch data will be read from standard input.
 See the "BATCH MODE" section for details.
 
+)
+description(
+
 dit(bf(--protocol=NUM)) Force an older protocol version to be used.  This
 is useful for creating a batch file that is compatible with an older
 version of rsync.  For instance, if rsync 2.6.4 is being used with the
@@ -2606,13 +2675,14 @@ applications that want repeatable block checksums, or in the case where the
 user wants a more random checksum seed.  Setting NUM to 0 causes rsync to use
 the default of code(time()) for checksum seed.
 
-enddit()
+)
 
 manpagesection(DAEMON OPTIONS)
 
 The options allowed when starting an rsync daemon are as follows:
 
-startdit()
+description(
+
 dit(bf(--daemon)) This tells rsync that it is to run as a daemon.  The
 daemon you start running may be accessed using an rsync client using
 the bf(host::module) or bf(rsync://host/module/) syntax.
@@ -2692,7 +2762,8 @@ is the case.
 
 dit(bf(-h, --help)) When specified after bf(--daemon), print a short help
 page describing the options available for starting an rsync daemon.
-enddit()
+
+)
 
 manpagesection(FILTER RULES)
 
@@ -2806,16 +2877,20 @@ itemization(
 )
 
 Note that, when using the bf(--recursive) (bf(-r)) option (which is implied by
-bf(-a)), every subcomponent of every path is visited from the top down, so
-include/exclude patterns get applied recursively to each subcomponent's
-full name (e.g. to include "/foo/bar/baz" the subcomponents "/foo" and
-"/foo/bar" must not be excluded).
-The exclude patterns actually short-circuit the directory traversal stage
-when rsync finds the files to send.  If a pattern excludes a particular
-parent directory, it can render a deeper include pattern ineffectual
-because rsync did not descend through that excluded section of the
-hierarchy.  This is particularly important when using a trailing '*' rule.
-For instance, this won't work:
+bf(-a)), every subdir component of every path is visited left to right, with
+each directory having a chance for exclusion before its content.  In this way
+include/exclude patterns are applied recursively to the pathname of each node
+in the filesystem's tree (those inside the transfer).  The exclude patterns
+short-circuit the directory traversal stage as rsync finds the files to send.
+
+For instance, to include "/foo/bar/baz", the directories "/foo" and "/foo/bar"
+must not be excluded.  Excluding one of those parent directories prevents the
+examination of its content, cutting off rsync's recursion into those paths and
+rendering the include for "/foo/bar/baz" ineffectual (since rsync can't match
+something it never sees in the cut-off section of the directory hierarchy).
+
+The concept path exclusion is particularly important when using a trailing '*'
+rule.  For instance, this won't work:
 
 quote(
 tt(+ /some/path/this-file-will-not-be-found)nl()
@@ -2890,6 +2965,10 @@ itemization(
   option's default rules that exclude things like "CVS" and "*.o" are
   marked as perishable, and will not prevent a directory that was removed
   on the source from being deleted on the destination.
+  it() An bf(x) indicates that a rule affects xattr names in xattr copy/delete
+  operations (and is thus ignored when matching file/dir names). If no
+  xattr-matching rules are specified, a default xattr filtering rule is
+  used (see the bf(--xattrs) option).
 )
 
 manpagesection(MERGE-FILE FILTER RULES)
@@ -3329,7 +3408,7 @@ show why each individual file is included or excluded.
 
 manpagesection(EXIT VALUES)
 
-startdit()
+description(
 dit(bf(0)) Success
 dit(bf(1)) Syntax or usage error
 dit(bf(2)) Protocol incompatibility
@@ -3353,11 +3432,11 @@ dit(bf(24)) Partial transfer due to vanished source files
 dit(bf(25)) The --max-delete limit stopped deletions
 dit(bf(30)) Timeout in data send/receive
 dit(bf(35)) Timeout waiting for daemon connection
-enddit()
+)
 
 manpagesection(ENVIRONMENT VARIABLES)
 
-startdit()
+description(
 dit(bf(CVSIGNORE)) The CVSIGNORE environment variable supplements any
 ignore patterns in .cvsignore files. See the bf(--cvs-exclude) option for
 more details.
@@ -3382,7 +3461,7 @@ are used to determine the default username sent to an rsync daemon.
 If neither is set, the username defaults to "nobody".
 dit(bf(HOME)) The HOME environment variable is used to find the user's
 default .cvsignore file.
-enddit()
+)
 
 manpagefiles()
 
@@ -3410,7 +3489,7 @@ url(http://rsync.samba.org/)(http://rsync.samba.org/)
 
 manpagesection(VERSION)
 
-This man page is current for version 3.1.2 of rsync.
+This man page is current for version 3.1.3 of rsync.
 
 manpagesection(INTERNAL OPTIONS)
 

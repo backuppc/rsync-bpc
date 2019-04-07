@@ -108,6 +108,12 @@
    without error */
 #undef HAVE_FALLOCATE
 
+/* Define if FALLOC_FL_PUNCH_HOLE is available. */
+#undef HAVE_FALLOC_FL_PUNCH_HOLE
+
+/* Define if FALLOC_FL_ZERO_RANGE is available. */
+#undef HAVE_FALLOC_FL_ZERO_RANGE
+
 /* Define to 1 if you have the `fchmod' function. */
 #undef HAVE_FCHMOD
 
@@ -448,6 +454,9 @@
 
 /* Define to 1 if `st_mtimensec' is a member of `struct stat'. */
 #undef HAVE_STRUCT_STAT_ST_MTIMENSEC
+
+/* Define to 1 if `st_mtimespec.tv_nsec' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_MTIMESPEC_TV_NSEC
 
 /* Define to 1 if `st_mtim.tv_nsec' is a member of `struct stat'. */
 #undef HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC
