@@ -917,7 +917,7 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
                 return -1;
             }
 
-            fileNameLen = getVarInt(&bufP, buf + nRead);
+            fileNameLen = getVarInt_v3(&bufP, buf + nRead);
             if ( fileNameLen > 2 * BPC_MAXPATHLEN - 16 ) {
                 bpc_logErrf("bpc_attrib_dirRead: got unreasonable file name length %d\n", fileNameLen);
                 bpc_fileZIO_close(&fd);
