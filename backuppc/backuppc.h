@@ -284,8 +284,8 @@ typedef struct {
      */
     ushort isTemp;
     uint32 mode;
-    uint32 uid;
-    uint32 gid;
+    uid_t uid;
+    gid_t gid;
     uint32 nlinks;
     time_t mtime;
     OFF_T size;
