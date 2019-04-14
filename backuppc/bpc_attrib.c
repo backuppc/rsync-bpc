@@ -566,21 +566,19 @@ static int64 getVarInt_v3(uchar **bufPP, uchar *bufEnd)
 static void setVarInt(uchar **bufPP, uchar *bufEnd, int64 value)
 {
     uchar *bufP = *bufPP;
+    int maxBytes = (sizeof(value) * 8 + 6) / 7;
 
-    if ( value < 0 ) {
-        bpc_logErrf("setVarInt botch: got negative argument %ld; setting to 0\n", (long int)value);
-        value = 0;
-    }
     do {
         uchar c = value & 0x7f;
         value >>= 7;
-        if ( value ) c |= 0x80;
+        maxBytes--;
+        if ( value && maxBytes > 0 ) c |= 0x80;
         if ( bufP < bufEnd ) {
             *bufP++ = c;
         } else {
             bufP++;
         }
-    } while ( value );
+    } while ( value && maxBytes > 0 );
     *bufPP = bufP;
 }
 
