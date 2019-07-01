@@ -176,6 +176,15 @@ static void inodePath(UNUSED(bpc_attribCache_info *ac), char *indexStr, char *at
     *indexStr = '\0';
 }
 
+static void bpc_attribCache_removeDeletedEntries(bpc_attrib_file *file, void *arg)
+{
+    bpc_attribCache_dir *attr = (bpc_attribCache_dir*)arg;
+    if ( file->type != BPC_FTYPE_DELETED ) return;
+    attr->dirty = 1;
+    bpc_attrib_fileDestroy(file);
+    bpc_hashtable_nodeDelete(&attr->dir.filesHT, file);
+}
+
 static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, char *fileName, char *path)
 {
     char dir[BPC_MAXPATHLEN], attribPath[BPC_MAXPATHLEN];
@@ -293,6 +302,10 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
         if ( (status = bpc_attrib_dirRead(&attr->dir, ac->backupTopDir, attribPath, ac->backupNum)) ) {
             bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s, %s) returned %d\n", ac->backupTopDir, attribPath, status);
         }
+        /*
+         * remove any extraneous BPC_FTYPE_DELETED file types
+         */
+	bpc_hashtable_iterate(&attr->dir.filesHT, (void*)bpc_attribCache_removeDeletedEntries, attr);
     }
     if ( bpc_hashtable_entryCount(&ac->attrHT) > BPC_ATTRIBCACHE_DIR_COUNT_MAX ) {
         bpc_attribCache_flush(ac, 0, NULL);
