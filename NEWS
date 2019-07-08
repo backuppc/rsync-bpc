@@ -1,5 +1,13 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.14 released X Jul 2019:
+
+   - fix to use correct int format when reading v3 attrib files
+
+   - allow mtime to be signed in attrib files
+
+   - remove any extraneous BPC_FTYPE_DELETED file types in non-merged backup
+
 3.0.9.13 released 25 Nov 2018:
 
    - on inflate error, first return any remaining bytes before returning an error.
