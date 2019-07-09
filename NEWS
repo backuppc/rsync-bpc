@@ -1,6 +1,6 @@
 NEWS for rsync-bpc-3.0.9.
 
-3.0.9.14 released X Jul 2019:
+3.0.9.14 released 8 Jul 2019:
 
    - fix to use correct int format when reading v3 attrib files
 
