@@ -63,7 +63,7 @@ void bpc_attrib_backwardCompat(int writeOldStyleAttribFile, int keepOldAttribFil
 {
     if ( writeOldStyleAttribFile >= 0 ) WriteOldStyleAttribFile = writeOldStyleAttribFile;
     if ( keepOldAttribFiles >= 0 )      KeepOldAttribFiles = keepOldAttribFiles;
-    if ( BPC_LogLevel >= 2 ) {
+    if ( BPC_LogLevel >= 5 ) {
         bpc_logMsgf("bpc_attrib_backwardCompat: WriteOldStyleAttribFile = %d, KeepOldAttribFiles = %d\n",
                      WriteOldStyleAttribFile, KeepOldAttribFiles);
     }
