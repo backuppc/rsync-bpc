@@ -1041,6 +1041,7 @@ int bpc_lstat(const char *fileName, struct stat *buf)
         S_IFBLK,                /* BPC_FTYPE_BLOCKDEV */
         S_IFDIR,                /* BPC_FTYPE_DIR */
         S_IFIFO,                /* BPC_FTYPE_FIFO */
+        S_IFREG,                /* BPC_FTYPE_UNKNOWN */
         S_IFSOCK,               /* BPC_FTYPE_SOCKET */
         S_IFREG,                /* BPC_FTYPE_UNKNOWN */
         S_IFREG,                /* BPC_FTYPE_DELETED */
