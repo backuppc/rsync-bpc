@@ -769,8 +769,10 @@ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct
          * Let's try the same thing.
          */
         if ( bpc_sysCall_poolFileCheck(fileName, rsyncFile)
-                || !(fileOrig = bpc_attribCache_getFile(&acNew, fileName, 0, 0)) ) { 
-            bpc_logErrf("bpc_sysCall_checkFileMatch(%s): file doesn't exist\n", fileName);
+                || !(fileOrig = bpc_attribCache_getFile(&acNew, fileName, 0, 0)) ) {
+            if ( fileSize > 0 ) {
+                bpc_logErrf("bpc_sysCall_checkFileMatch(%s): file doesn't exist\n", fileName);
+            }
             return -1;
         }
     }
