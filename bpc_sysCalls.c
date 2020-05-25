@@ -770,7 +770,9 @@ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct
          */
         if ( bpc_sysCall_poolFileCheck(fileName, rsyncFile)
                 || !(fileOrig = bpc_attribCache_getFile(&acNew, fileName, 0, 0)) ) { 
-            bpc_logErrf("bpc_sysCall_checkFileMatch(%s): file doesn't exist\n", fileName);
+            if ( fileSize > 0 ) {
+                bpc_logErrf("bpc_sysCall_checkFileMatch(%s): file doesn't exist\n", fileName);
+            }
             return -1;
         }
     }
