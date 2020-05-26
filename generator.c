@@ -1506,7 +1506,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 		if (preserve_xattrs && statret == 1)
 			copy_xattrs(fnamecmpbuf, fname);
 #endif
-		if (set_file_attrs(fname, file, real_ret ? NULL : &real_sx, NULL, 0)
+		if (set_file_attrs(fname, file, real_ret ? NULL : &real_sx, fname, 0)
 		    && INFO_GTE(NAME, 1) && code != FNONE && f_out != -1)
 			rprintf(code, "%s/\n", fname);
 
@@ -1584,7 +1584,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			 && (len = bpc_readlink(fname, lnk, MAXPATHLEN-1)) > 0
 			 && strncmp(lnk, sl, len) == 0 && sl[len] == '\0') {
 				/* The link is pointing to the right place. */
-				set_file_attrs(fname, file, &sx, NULL, maybe_ATTRS_REPORT);
+				set_file_attrs(fname, file, &sx, fname, maybe_ATTRS_REPORT);
 				if (itemizing)
 					itemize(fname, file, ndx, 0, &sx, 0, 0, NULL);
 #ifdef SUPPORT_HARD_LINKS
@@ -1615,7 +1615,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			}
 		}
 		if (atomic_create(file, fname, sl, NULL, MAKEDEV(0, 0), &sx, statret == 0 ? DEL_FOR_SYMLINK : 0)) {
-			set_file_attrs(fname, file, NULL, NULL, 0);
+			set_file_attrs(fname, file, NULL, fname, 0);
 			if (itemizing) {
 				if (statret == 0 && !S_ISLNK(sx.st.st_mode))
 					statret = -1;
@@ -1662,7 +1662,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			 && BITS_EQUAL(sx.st.st_mode, file->mode, _S_IFMT)
 			 && (IS_SPECIAL(sx.st.st_mode) || sx.st.st_rdev == rdev)) {
 				/* The device or special file is identical. */
-				set_file_attrs(fname, file, &sx, NULL, maybe_ATTRS_REPORT);
+				set_file_attrs(fname, file, &sx, fname, maybe_ATTRS_REPORT);
 				if (itemizing)
 					itemize(fname, file, ndx, 0, &sx, 0, 0, NULL);
 #ifdef SUPPORT_HARD_LINKS
@@ -1698,7 +1698,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 				(long)major(rdev), (long)minor(rdev));
 		}
 		if (atomic_create(file, fname, NULL, NULL, rdev, &sx, del_for_flag)) {
-			set_file_attrs(fname, file, NULL, NULL, 0);
+			set_file_attrs(fname, file, NULL, fname, 0);
 			if (itemizing) {
 				itemize(fnamecmp, file, ndx, statret, &sx,
 					ITEM_LOCAL_CHANGE|ITEM_REPORT_CHANGE, 0, NULL);
@@ -1826,7 +1826,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			do_unlink(partialptr);
 			handle_partial_dir(partialptr, PDIR_DELETE);
 		}
-		set_file_attrs(fname, file, &sx, NULL, maybe_ATTRS_REPORT | maybe_ATTRS_SET_NANO);
+		set_file_attrs(fname, file, &sx, fname, maybe_ATTRS_REPORT | maybe_ATTRS_SET_NANO);
 		if (itemizing)
 			itemize(fnamecmp, file, ndx, statret, &sx, 0, 0, NULL);
 #ifdef SUPPORT_HARD_LINKS
@@ -1994,7 +1994,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			preserve_xattrs = 0;
 		}
 #endif
-		set_file_attrs(backupptr, back_file, NULL, NULL, 0);
+		set_file_attrs(backupptr, back_file, NULL, fname, 0);
 		preserve_xattrs = save_preserve_xattrs;
 		if (INFO_GTE(BACKUP, 1)) {
 			rprintf(FINFO, "backed up %s to %s\n",

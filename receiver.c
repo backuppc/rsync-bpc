@@ -682,7 +682,7 @@ int recv_files(int f_in, int f_out, char *local_name)
 		if (!(iflags & ITEM_TRANSFER)) {
 			maybe_log_item(file, iflags, itemizing, xname);
 #ifdef SUPPORT_XATTRS
-			if (preserve_xattrs && iflags & ITEM_REPORT_XATTR && do_xfers
+			if (preserve_xattrs && S_ISREG(file->mode) && iflags & ITEM_REPORT_XATTR && do_xfers
 			 && !BITS_SET(iflags, ITEM_XNAME_FOLLOWS|ITEM_LOCAL_CHANGE))
 				set_file_attrs(fname, file, NULL, fname, 0);
 #endif
