@@ -332,7 +332,17 @@ AC_CHECK_HEADERS(sys/fcntl.h sys/select.h fcntl.h sys/time.h sys/unistd.h \
     netdb.h malloc.h float.h limits.h iconv.h libcharset.h langinfo.h \
     sys/acl.h acl/libacl.h attr/xattr.h sys/xattr.h sys/extattr.h \
     popt.h popt/popt.h netinet/in_systm.h netinet/ip.h)
-AC_HEADER_MAJOR
+AC_CHECK_HEADERS_ONCE([sys/types.h])
+AC_CHECK_HEADER(sys/mkdev.h,
+                [AC_DEFINE(MAJOR_IN_MKDEV, 1,
+                           [Define to 1 if `major', `minor', and `makedev' are
+                            declared in <mkdev.h>.])])
+if test $ac_cv_header_sys_mkdev_h = no; then
+  AC_CHECK_HEADER(sys/sysmacros.h,
+                  [AC_DEFINE(MAJOR_IN_SYSMACROS, 1,
+                             [Define to 1 if `major', `minor', and `makedev'
+                              are declared in <sysmacros.h>.])])
+fi
 
 AC_CACHE_CHECK([if makedev takes 3 args],rsync_cv_MAKEDEV_TAKES_3_ARGS,[
 AC_TRY_RUN([
