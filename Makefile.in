@@ -125,15 +125,15 @@ t_unsafe$(EXEEXT): $(T_UNSAFE_OBJ)
 
 gen: conf proto.h
 
-gensend: gen
-	rsync -aivzc $(GENFILES) $${SAMBA_HOST-samba.org}:/home/ftp/pub/rsync/generated-files/
-
 conf:
 	cd $(srcdir) && $(MAKE) -f prepare-source.mak conf
 
 reconfigure: configure.sh
 	./config.status --recheck
 	./config.status
+
+configure.sh: configure.ac
+	autoconf configure.ac > configure.sh
 
 Makefile: Makefile.in config.status configure.sh config.h.in
 	@if test -f Makefile; then cp -p Makefile Makefile.old; else touch Makefile.old; fi
@@ -210,8 +210,3 @@ splint:
 
 doxygen:
 	cd $(srcdir) && rm dox/html/* && doxygen
-
-# for maintainers only
-doxygen-upload:
-	rsync -avzv $(srcdir)/dox/html/ --delete \
-	$${SAMBA_HOST-samba.org}:/home/httpd/html/rsync/doxygen/head/
