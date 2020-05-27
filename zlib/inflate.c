@@ -885,6 +885,7 @@ int flush;
             INITBITS();
             state->mode = COPY_;
             if (flush == Z_TREES) goto inf_leave;
+            /* FALL THROUGH */
         case COPY_:
             state->mode = COPY;
 	    /* FALL THROUGH */
