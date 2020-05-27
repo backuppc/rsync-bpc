@@ -293,6 +293,7 @@ enum delret {
 #undef NO_DEVICE_XATTRS
 #undef NO_SPECIAL_XATTRS
 #undef NO_SYMLINK_XATTRS
+#undef NO_SYMLINK_USER_XATTRS
 
 #define SUPPORT_HARD_LINKS 1
 #define SUPPORT_LINKS 1
@@ -1074,7 +1075,7 @@ extern int errno;
 #ifdef HAVE_READLINK
 #define SUPPORT_LINKS 1
 #if !defined NO_SYMLINK_XATTRS && !defined NO_SYMLINK_USER_XATTRS
-#define do_readlink(path, buf, bufsiz) readlink(path, buf, bufsiz)
+#define do_readlink(path, buf, bufsiz) bpc_readlink(path, buf, bufsiz)
 #endif
 #endif
 #ifdef HAVE_LINK
