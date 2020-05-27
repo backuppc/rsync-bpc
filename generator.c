@@ -1820,11 +1820,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 			do_unlink(partialptr);
 			handle_partial_dir(partialptr, PDIR_DELETE);
 		}
-<<<<<<< HEAD
-		set_file_attrs(fname, file, &sx, NULL, maybe_ATTRS_REPORT);
-=======
-		set_file_attrs(fname, file, &sx, fname, maybe_ATTRS_REPORT | maybe_ATTRS_SET_NANO);
->>>>>>> 757a6d7... generator sets xattr rather than receiver; fixes xattr setting for
+		set_file_attrs(fname, file, &sx, fname, maybe_ATTRS_REPORT);
 		if (itemizing)
 			itemize(fnamecmp, file, ndx, statret, &sx, 0, 0, NULL);
 #ifdef SUPPORT_HARD_LINKS
