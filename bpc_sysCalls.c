@@ -1939,22 +1939,24 @@ ssize_t bpc_lgetxattr(const char *path, const char *name, void *value, size_t si
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)path, 0, 0);
     bpc_attrib_xattr *xattr;
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s)\n", path, name);
-
     if ( !file ) {
         errno = ENOENT;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s, %lu) -> file not found\n", path, name, size);
         return -1;
     }
     if ( !(xattr = bpc_attrib_xattrGet(file, (char*)name, strlen(name) + 1, 0)) ) {
         errno = ENOENT;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s, %lu) -> xattr not found\n", path, name, size);
         return -1;
     }
-    if ( !value ) return xattr->valueLen;
+    if ( !value || size == 0 ) return xattr->valueLen;
     if ( xattr->valueLen <= size ) {
         memcpy(value, xattr->value, xattr->valueLen);
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s, %lu) -> returning value len %u\n", path, name, size, xattr->valueLen);
         return xattr->valueLen;
     } else {
         memcpy(value, xattr->value, size);
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s, %lu) -> returning truncated value len %u\n", path, name, size, xattr->valueLen);
         return size;
     }
 }
@@ -1974,14 +1976,12 @@ ssize_t bpc_fgetxattr(int filedes, const char *name, void *value, size_t size)
 int bpc_lsetxattr(const char *path, const char *name, const void *value, size_t size, UNUSED(int flags))
 {
     int ret;
-
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s)\n", path, name);
-
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)path, 0, 0);
     bpc_attrib_xattr *xattr;
 
     if ( !file ) {
         errno = ENOENT;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s, %lu) -> file not found\n", path, name, size);
         return -1;
     }
 
@@ -1991,7 +1991,7 @@ int bpc_lsetxattr(const char *path, const char *name, const void *value, size_t 
      */
     if ( (xattr = bpc_attrib_xattrGet(file, (char*)name, strlen(name) + 1, 0)) ) {
         if ( xattr->valueLen == size && !memcmp(xattr->value, value, xattr->valueLen) ) {
-            if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s) unchanged\n", path, name);
+            if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s, %lu) -> xattr unchanged\n", path, name, size);
             return 0;
         }
     }
@@ -2008,12 +2008,9 @@ int bpc_lsetxattr(const char *path, const char *name, const void *value, size_t 
     /*
      * now set the new attribute value
      */
-    if ( (ret = bpc_attrib_xattrSetValue(file, (char*)name, strlen(name) + 1, (void*)value, size)) < 0 ) {
-        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s) -> return %d\n", path, name, ret);
-        return ret;
-    }
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s) -> return %d\n", path, name, 0);
-    return 0;
+    ret = bpc_attrib_xattrSetValue(file, (char*)name, strlen(name) + 1, (void*)value, size);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s, %lu) -> return %d\n", path, name, size, ret);
+    return ret;
 }
 
 int bpc_lremovexattr(const char *path, const char *name)
@@ -2021,17 +2018,19 @@ int bpc_lremovexattr(const char *path, const char *name)
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)path, 0, 0);
     bpc_attrib_xattr *xattr;
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lremovexattr(%s, %s)\n", path, name);
-
     if ( !file ) {
         errno = ENOENT;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lremovexattr(%s, %s) -> file not found\n", path, name);
         return -1;
     }
 
     /*
      * Check if the attribute is exists - if not then quietly return.
      */
-    if ( !(xattr = bpc_attrib_xattrGet(file, (char*)name, strlen(name) + 1, 0)) ) return 0;
+    if ( !(xattr = bpc_attrib_xattrGet(file, (char*)name, strlen(name) + 1, 0)) ) {
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lremovexattr(%s, %s) -> xattr not found\n", path, name);
+        return 0;
+    }
 
     /*
      * Save away the attributes in old if not recently set and not present already
@@ -2045,6 +2044,7 @@ int bpc_lremovexattr(const char *path, const char *name)
     /*
      * now remove the attribute
      */
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lremovexattr(%s, %s) -> xattr removed\n", path, name);
     return bpc_attrib_xattrDelete(file, (char*)name, strlen(name) + 1);
 }
 
@@ -2052,11 +2052,11 @@ ssize_t bpc_llistxattr(const char *path, char *list, size_t size)
 {
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)path, 0, 0);
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_llistxattr(%s)\n", path);
-
     if ( !file ) {
         errno = ENOENT;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_llistxattr(%s) -> file not found\n", path);
         return -1;
     }
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_llistxattr(%s):\n", path);
     return bpc_attrib_xattrList(file, list, size, 1);
 }
