@@ -661,6 +661,7 @@ uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *bufP, uchar *bufEnd
         return NULL;
     }
     bufP += fileNameLen;
+    bpc_attrib_xattrDeleteAll(file);
     xattrNumEntries = getVarInt(&bufP, bufEnd);
     bufP = bpc_attrib_buf2file(file, bufP, bufEnd, xattrNumEntries);
     return bufP;
