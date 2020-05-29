@@ -954,6 +954,11 @@ int del_def_xattr_acl(const char *fname)
 {
 	return sys_lremovexattr(fname, XDEF_ACL_ATTR);
 }
+
+int del_acc_xattr_acl(const char *fname)
+{
+	return sys_lremovexattr(fname, XACC_ACL_ATTR);
+}
 #endif
 
 int get_stat_xattr(const char *fname, int fd, STRUCT_STAT *fst, STRUCT_STAT *xst)

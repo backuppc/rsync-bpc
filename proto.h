@@ -456,6 +456,7 @@ int set_xattr(const char *fname, const struct file_struct *file,
 char *get_xattr_acl(const char *fname, int is_access_acl, size_t *len_p);
 int set_xattr_acl(const char *fname, int is_access_acl, const char *buf, size_t buf_len);
 int del_def_xattr_acl(const char *fname);
+int del_acc_xattr_acl(const char *fname);
 int get_stat_xattr(const char *fname, int fd, STRUCT_STAT *fst, STRUCT_STAT *xst);
 int set_stat_xattr(const char *fname, struct file_struct *file, mode_t new_mode);
 int x_stat(const char *fname, STRUCT_STAT *fst, STRUCT_STAT *xst);
