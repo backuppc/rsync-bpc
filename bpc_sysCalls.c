@@ -322,9 +322,9 @@ static int bpc_fileWriteBuffer(int fdNum, char *buffer, size_t nBytes)
  */
 static int bpc_fileSwitchToDisk(bpc_attribCache_info *ac, FdInfo *fd)
 {
-    char tmpFileName[BPC_MAXPATHLEN];
+    char tmpFileName[2*BPC_MAXPATHLEN];
 
-    snprintf(tmpFileName, BPC_MAXPATHLEN, "%s/rsyncTmp.%d.%d.%d", ac->backupTopDir, getpid(), am_generator, TmpFileCnt++);
+    snprintf(tmpFileName, sizeof(tmpFileName), "%s/rsyncTmp.%d.%d.%d", ac->backupTopDir, getpid(), am_generator, TmpFileCnt++);
     fd->tmpFileName = malloc(strlen(tmpFileName) + 1);
     if ( !fd->tmpFileName ) {
         bpc_logErrf("bpc_fileSwitchToDisk: can't allocated %lu bytes for temp file name\n", (unsigned long)strlen(tmpFileName) + 1);
