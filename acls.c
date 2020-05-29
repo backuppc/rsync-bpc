@@ -966,7 +966,11 @@ static int set_rsync_acl(const char *fname, acl_duo *duo_item,
 			return -1;
 		}
 #ifdef SUPPORT_XATTRS
-	} else {
+	} else if ( duo_item->racl.names.count == 0 && duo_item->racl.user_obj == NO_ENTRY && duo_item->racl.group_obj == NO_ENTRY
+                        && duo_item->racl.mask_obj == NO_ENTRY && duo_item->racl.other_obj == NO_ENTRY ) {
+                /* remove emtpy acls */
+                return del_acc_xattr_acl(fname);
+        } else {
 		/* --fake-super support: store ACLs in an xattr. */
 		int cnt = duo_item->racl.names.count;
 		size_t len = 4*4 + cnt * (4+4);
