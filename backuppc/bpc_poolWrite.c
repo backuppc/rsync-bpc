@@ -342,8 +342,6 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
 
         info->digestExtZeroLen = -1;
         while ( 1 ) {
-            char poolPath[BPC_MAXPATHLEN];
-
             bpc_digest_append_ext(&info->digest, ext);
             bpc_digest_md52path(poolPath, info->compress, &info->digest);
             /*
