@@ -121,7 +121,21 @@ int bpc_attrib_xattrDeleteAll(bpc_attrib_file *file)
  */
 int bpc_attrib_xattrSetValue(bpc_attrib_file *file, void *key, int keyLen, void *value, uint32 valueLen)
 {
-    bpc_attrib_xattr *xattr = bpc_attrib_xattrGet(file, key, keyLen, 1);
+    bpc_attrib_xattr *xattr;
+    char keyCopy[BPC_MAXPATHLEN];
+
+    if ( ((char*)key)[keyLen - 1] != 0x0 ) {
+        if ( keyLen >= BPC_MAXPATHLEN - 8 ) {
+            bpc_logMsgf("bpc_attrib_xattrSetValue: BOTCH: key not 0x0 terminated; too long to repair (keyLen %u)\n", keyLen);
+            return -1;
+        } else {
+            memcpy(keyCopy, key, keyLen);
+            keyCopy[keyLen++] = 0x0;
+            key = keyCopy;
+            bpc_logMsgf("bpc_attrib_xattrSetValue: BOTCH: appended 0x0 to xattr name '%s' (keyLen now %u)\n", (char*)key, keyLen);
+        }
+    }
+    xattr = bpc_attrib_xattrGet(file, key, keyLen, 1);
 
     if ( !xattr->value ) {
         /*
@@ -223,9 +237,14 @@ static void bpc_attrib_xattrListKey(bpc_attrib_xattr *xattr, xattrList_info *inf
             return;
         }
         /*
-         * keyLen already includes the \0 terminating byte
+         * confirm that keyLen includes the \0 terminating byte
          */
         memcpy(info->list + info->idx, xattr->key.key, xattr->key.keyLen);
+        if ( xattr->key.keyLen >= 1 && info->list[info->idx + xattr->key.keyLen - 1] != 0x0 ) {
+            info->list[info->idx + xattr->key.keyLen - 1] = 0x0;
+            bpc_logMsgf("bpc_attrib_xattrListKey: BOTCH: truncated xattr name '%s' to match keyLen %u\n", info->list + info->idx, xattr->key.keyLen);
+        }
+        if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_xattrListKey: adding %s\n", info->list + info->idx);
         info->idx += xattr->key.keyLen;
     } else {
         info->idx += xattr->key.keyLen;
@@ -367,6 +386,13 @@ void bpc_attrib_fileDeleteName(bpc_attrib_dir *dir, char *fileName)
     if ( !file ) return;
     bpc_attrib_fileDestroy(file);
     bpc_hashtable_nodeDelete(&dir->filesHT, file);
+}
+
+int bpc_attrib_fileIterate(bpc_attrib_dir *dir, bpc_attrib_file **file, uint *idx)
+{
+    *file = bpc_hashtable_nextEntry(&dir->filesHT, idx);
+    if ( !*file ) return -1;
+    return 0;
 }
 
 int bpc_attrib_fileCount(bpc_attrib_dir *dir)
@@ -642,7 +668,9 @@ uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *bufP, uchar *bufEnd
         return NULL;
     }
     bufP += fileNameLen;
+    bpc_attrib_xattrDeleteAll(file);
     xattrNumEntries = getVarInt(&bufP, bufEnd);
+    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_buf2fileFull: xattrNumEntries = %d\n", xattrNumEntries);
     bufP = bpc_attrib_buf2file(file, bufP, bufEnd, xattrNumEntries);
     return bufP;
 }
@@ -959,6 +987,7 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
 typedef struct {
     uchar *bufP;
     uchar *bufEnd;
+    uint numEntries;
 } buf_info;
 
 typedef struct {
@@ -981,8 +1010,12 @@ static void bpc_attrib_xattrWrite(bpc_attrib_xattr *xattr, buf_info *info)
     setVarInt(&info->bufP, info->bufEnd, xattr->key.keyLen);
     setVarInt(&info->bufP, info->bufEnd, xattr->valueLen);
 
-    if ( info->bufP + xattr->key.keyLen <= info->bufEnd ) {
+    if ( xattr->key.keyLen >= 1 && info->bufP + xattr->key.keyLen <= info->bufEnd ) {
         memcpy(info->bufP, xattr->key.key, xattr->key.keyLen);
+        if ( info->bufP[xattr->key.keyLen - 1] != 0x0 ) {
+            info->bufP[xattr->key.keyLen - 1] = 0x0;
+            bpc_logMsgf("bpc_attrib_xattrWrite: BOTCH: truncated xattr name '%s' to match keyLen %u\n", info->bufP, xattr->key.keyLen);
+        }
     }
     info->bufP += xattr->key.keyLen;
 
@@ -990,6 +1023,7 @@ static void bpc_attrib_xattrWrite(bpc_attrib_xattr *xattr, buf_info *info)
         memcpy(info->bufP, xattr->value, xattr->valueLen);
     }
     info->bufP += xattr->valueLen;
+    info->numEntries++;
 }
 
 /*
@@ -1029,10 +1063,13 @@ uchar *bpc_attrib_file2buf(bpc_attrib_file *file, uchar *buf, uchar *bufEnd)
     }
     bufP += file->digest.len;
 
-    info.bufEnd = bufEnd;
-    info.bufP   = bufP;
+    info.bufEnd     = bufEnd;
+    info.bufP       = bufP;
+    info.numEntries = 0;
     bpc_hashtable_iterate(&file->xattrHT, (void*)bpc_attrib_xattrWrite, &info);
-
+    if ( info.numEntries != xattrEntryCnt ) {
+        bpc_logErrf("bpc_attrib_file2buf: BOTCH: wrote %u xattr entries vs %u; attrib file corrupted\n", info.numEntries, xattrEntryCnt);
+    }
     return info.bufP;
 }
 
