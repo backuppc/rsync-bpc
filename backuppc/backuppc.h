@@ -320,6 +320,7 @@ size_t bpc_attrib_xattrList(bpc_attrib_file *file, char *list, size_t listLen, i
 void bpc_attrib_fileInit(bpc_attrib_file *file, char *fileName, int xattrNumEntries);
 void bpc_attrib_fileDestroy(bpc_attrib_file *file);
 bpc_attrib_file *bpc_attrib_fileGet(bpc_attrib_dir *dir, char *fileName, int allocate_if_missing);
+int bpc_attrib_fileIterate(bpc_attrib_dir *dir, bpc_attrib_file **file, uint *idx);
 void bpc_attrib_fileCopyOpt(bpc_attrib_file *fileDest, bpc_attrib_file *fileSrc, int overwriteEmptyDigest);
 void bpc_attrib_fileCopy(bpc_attrib_file *fileDest, bpc_attrib_file *fileSrc);
 int bpc_attrib_fileCompare(bpc_attrib_file *file0, bpc_attrib_file *file1);

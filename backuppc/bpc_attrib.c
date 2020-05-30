@@ -244,7 +244,7 @@ static void bpc_attrib_xattrListKey(bpc_attrib_xattr *xattr, xattrList_info *inf
             info->list[info->idx + xattr->key.keyLen - 1] = 0x0;
             bpc_logMsgf("bpc_attrib_xattrListKey: BOTCH: truncated xattr name '%s' to match keyLen %u\n", info->list + info->idx, xattr->key.keyLen);
         }
-        if ( BPC_LogLevel >= 4 ) bpc_logMsgf("bpc_attrib_xattrListKey: adding %s\n", info->list + info->idx);
+        if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_xattrListKey: adding %s\n", info->list + info->idx);
         info->idx += xattr->key.keyLen;
     } else {
         info->idx += xattr->key.keyLen;
@@ -386,6 +386,13 @@ void bpc_attrib_fileDeleteName(bpc_attrib_dir *dir, char *fileName)
     if ( !file ) return;
     bpc_attrib_fileDestroy(file);
     bpc_hashtable_nodeDelete(&dir->filesHT, file);
+}
+
+int bpc_attrib_fileIterate(bpc_attrib_dir *dir, bpc_attrib_file **file, uint *idx)
+{
+    *file = bpc_hashtable_nextEntry(&dir->filesHT, idx);
+    if ( !*file ) return -1;
+    return 0;
 }
 
 int bpc_attrib_fileCount(bpc_attrib_dir *dir)
@@ -663,6 +670,7 @@ uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *bufP, uchar *bufEnd
     bufP += fileNameLen;
     bpc_attrib_xattrDeleteAll(file);
     xattrNumEntries = getVarInt(&bufP, bufEnd);
+    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_buf2fileFull: xattrNumEntries = %d\n", xattrNumEntries);
     bufP = bpc_attrib_buf2file(file, bufP, bufEnd, xattrNumEntries);
     return bufP;
 }
