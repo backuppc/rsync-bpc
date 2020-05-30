@@ -26,15 +26,35 @@
 
 #define BPC_MAXPATHLEN          (2 * MAXPATHLEN)
 
-extern char BPC_PoolDir[];
-extern char BPC_CPoolDir[];
-extern char BPC_PoolDir3[];
-extern char BPC_CPoolDir3[];
-extern char BPC_TopDir[];
 extern int BPC_HardLinkMax;
 extern int BPC_PoolV3Enabled;
 extern int BPC_TmpFileUnique;
 extern int BPC_LogLevel;
+
+/*
+ * String buffer functions
+ */
+typedef struct _bpc_strBuf {
+    char *s;
+    size_t size;
+    char buffer[32];
+    struct _bpc_strBuf *next;   /* for free list */
+} bpc_strBuf;
+
+bpc_strBuf *bpc_strBuf_new(void);
+void bpc_strBuf_init(bpc_strBuf *buf);
+void bpc_strBuf_free(bpc_strBuf *buf);
+void bpc_strBuf_resize(bpc_strBuf *buf, size_t needed);
+char *bpc_strBuf_strcpy(bpc_strBuf *buf, unsigned int offset, char *str);
+char *bpc_strBuf_strcat(bpc_strBuf *buf, unsigned int offset, char *str);
+int bpc_strBuf_vsnprintf(bpc_strBuf *buf, unsigned int offset, char *fmt, va_list args);
+int bpc_strBuf_snprintf(bpc_strBuf *buf, unsigned int offset, char *fmt, ...);
+
+extern bpc_strBuf BPC_PoolDir;
+extern bpc_strBuf BPC_CPoolDir;
+extern bpc_strBuf BPC_PoolDir3;
+extern bpc_strBuf BPC_CPoolDir3;
+extern bpc_strBuf BPC_TopDir;
 
 /*
  * Maximum length of a digest - 16 bytes for MD5, but 4 bytes of collision counting
@@ -104,7 +124,7 @@ void bpc_poolRefRequestFsck(char *targetDir, int ext);
  */
 typedef struct {
     bpc_refCount_info refCnt[2];
-    char targetDir[BPC_MAXPATHLEN];
+    bpc_strBuf *targetDir;
 } bpc_deltaCount_info;
 
 void bpc_poolRefDeltaFileInit(bpc_deltaCount_info *info, char *hostDir);
@@ -158,7 +178,7 @@ typedef struct _bpc_candidate_file {
     bpc_digest digest;
     OFF_T fileSize;
     int v3File;
-    char fileName[BPC_MAXPATHLEN];
+    bpc_strBuf *fileName;
     struct _bpc_candidate_file *next;
 } bpc_candidate_file;
 
@@ -168,7 +188,7 @@ typedef struct {
     int v3File;
     OFF_T fileSize;
     bpc_digest digest;
-    char fileName[BPC_MAXPATHLEN];
+    bpc_strBuf *fileName;
 } bpc_candidate_match;
 
 typedef struct {
@@ -200,7 +220,7 @@ typedef struct {
      */
     int fdOpen;
     bpc_fileZIO_fd fd;
-    char tmpFileName[BPC_MAXPATHLEN];
+    bpc_strBuf *tmpFileName;
     /*
      * Error count
      */
@@ -239,11 +259,11 @@ void bpc_digest_append_ext(bpc_digest *digest, uint32 ext);
 void bpc_digest_digest2str(bpc_digest *digest, char *hexStr);
 void bpc_digest_str2digest(bpc_digest *digest, char *hexStr);
 int bpc_digest_compare(bpc_digest *digest1, bpc_digest *digest2);
-void bpc_digest_md52path(char *path, int compress, bpc_digest *digest);
-void bpc_digest_md52path_v3(char *path, int compress, bpc_digest *digest);
+void bpc_digest_md52path(bpc_strBuf *path, int compress, bpc_digest *digest);
+void bpc_digest_md52path_v3(bpc_strBuf *path, int compress, bpc_digest *digest);
 void bpc_digest_buffer2MD5_v3(bpc_digest *digest, uchar *buffer, size_t bufferLen);
-void bpc_fileNameEltMangle(char *path, int pathSize, char *pathUM);
-void bpc_fileNameMangle(char *path, int pathSize, char *pathUM);
+void bpc_fileNameEltMangle(bpc_strBuf *path, char *pathUM);
+void bpc_fileNameMangle(bpc_strBuf *path, char *pathUM, unsigned int i);
 void bpc_logMsgf(char *fmt, ...);
 void bpc_logErrf(char *fmt, ...);
 void bpc_logMsgGet(char **mesg, size_t *mesgLen);
@@ -332,7 +352,7 @@ void bpc_attrib_dirDestroy(bpc_attrib_dir *dir);
 ssize_t bpc_attrib_getEntries(bpc_attrib_dir *dir, char *entries, ssize_t entrySize);
 void bpc_attrib_dirRefCount(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, int incr);
 void bpc_attrib_dirRefCountInodeMax(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, int incr, unsigned int *inodeMax);
-void bpc_attrib_attribFilePath(char *path, char *dir, char *attribFileName);
+void bpc_attrib_attribFilePath(bpc_strBuf *path, char *dir, char *attribFileName);
 bpc_digest *bpc_attrib_dirDigestGet(bpc_attrib_dir *dir);
 uchar *bpc_attrib_buf2file(bpc_attrib_file *file, uchar *buf, uchar *bufEnd, int xattrNumEntries);
 uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *buf, uchar *bufEnd);
@@ -397,13 +417,11 @@ typedef struct {
      */
     bpc_deltaCount_info *deltaInfo;
 
-    char shareName[BPC_MAXPATHLEN];
-    int shareNameLen;
-    char shareNameUM[BPC_MAXPATHLEN];
-    char hostName[BPC_MAXPATHLEN];
-    char hostDir[BPC_MAXPATHLEN];
-    char backupTopDir[BPC_MAXPATHLEN];
-    char currentDir[BPC_MAXPATHLEN];
+    bpc_strBuf *shareName;
+    bpc_strBuf *shareNameUM;
+    bpc_strBuf *hostName;
+    bpc_strBuf *backupTopDir;
+    bpc_strBuf *currentDir;
 } bpc_attribCache_info;
 
 typedef struct {
@@ -435,6 +453,6 @@ int bpc_attribCache_deleteInode(bpc_attribCache_info *ac, ino_t inode);
 int bpc_attribCache_getDirEntryCnt(bpc_attribCache_info *ac, char *path);
 ssize_t bpc_attribCache_getDirEntries(bpc_attribCache_info *ac, char *path, char *entries, ssize_t entrySize);
 void bpc_attribCache_flush(bpc_attribCache_info *ac, int all, char *path);
-void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, char *path, char *dirName, int backupNum);
+void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, bpc_strBuf *path, char *dirName, int backupNum);
 
 #endif

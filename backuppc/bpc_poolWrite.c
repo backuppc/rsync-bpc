@@ -53,6 +53,7 @@ int bpc_poolWrite_open(bpc_poolWrite_info *info, int compress, bpc_digest *diges
     info->retryCnt      = 0;
     info->digestExtOpen = -1;
     info->digestExtZeroLen = -1;
+    info->tmpFileName   = bpc_strBuf_new();
     for ( i = 0 ; i < BPC_POOL_WRITE_CONCURRENT_MATCH ; i++ ) {
         info->match[i].used = 0;
     }
@@ -74,12 +75,9 @@ int bpc_poolWrite_open(bpc_poolWrite_info *info, int compress, bpc_digest *diges
         info->digest.len = 0;
     }
     info->digest_v3.len = 0;
-    if ( snprintf(info->tmpFileName, sizeof(info->tmpFileName), "%s/%d.%d.%d",
-                compress ? BPC_CPoolDir : BPC_PoolDir, (int)getpid(), PoolWriteCnt++,
-                BPC_TmpFileUnique >= 0 ? BPC_TmpFileUnique : 0) >= (int)sizeof(info->tmpFileName) - 1 ) {
-        bpc_logErrf("bpc_poolWrite_open: file name too long %s\n", info->tmpFileName);
-        return -1;
-    }
+    bpc_strBuf_snprintf(info->tmpFileName, 0, "%s/%d.%d.%d",
+                                compress ? BPC_CPoolDir.s : BPC_PoolDir.s, (int)getpid(), PoolWriteCnt++,
+                                BPC_TmpFileUnique >= 0 ? BPC_TmpFileUnique : 0);
     return 0;
 }
 
@@ -102,10 +100,10 @@ static int bpc_poolWrite_updateMatches(bpc_poolWrite_info *info)
 
             candidateFile = info->candidateList;
             info->candidateList = candidateFile->next;
-            if ( bpc_fileZIO_open(&info->match[i].fd, candidateFile->fileName, 0, info->compress) ) {
+            if ( bpc_fileZIO_open(&info->match[i].fd, candidateFile->fileName->s, 0, info->compress) ) {
                 info->errorCnt++;
                 bpc_logErrf("bpc_poolWrite_updateMatches: can't open candidate file %s for read\n",
-                                            candidateFile->fileName);
+                                            candidateFile->fileName->s);
                 free(candidateFile);
                 continue;
             }
@@ -161,7 +159,7 @@ static int bpc_poolWrite_updateMatches(bpc_poolWrite_info *info)
                 }
             }
             if ( !match ) {
-                if ( BPC_LogLevel >= 8 ) bpc_logMsgf("Discarding %s since it doesn't match starting portion\n", candidateFile->fileName);
+                if ( BPC_LogLevel >= 8 ) bpc_logMsgf("Discarding %s since it doesn't match starting portion\n", candidateFile->fileName->s);
                 bpc_fileZIO_close(&info->match[i].fd);
                 free(candidateFile);
                 continue;
@@ -170,9 +168,11 @@ static int bpc_poolWrite_updateMatches(bpc_poolWrite_info *info)
             info->match[i].digest   = candidateFile->digest;
             info->match[i].v3File   = candidateFile->v3File;
             info->match[i].fileSize = candidateFile->fileSize;
-            strcpy(info->match[i].fileName, candidateFile->fileName);
+            info->match[i].fileName = bpc_strBuf_new();
+            bpc_strBuf_strcpy(info->match[i].fileName, 0, candidateFile->fileName->s);
             nMatch++;
-            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("match[%d] now set to %s\n", i, info->match[i].fileName);
+            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("match[%d] now set to %s\n", i, info->match[i].fileName->s);
+            bpc_strBuf_free(candidateFile->fileName);
             free(candidateFile);
             break;
         }
@@ -224,9 +224,9 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                  * So we need to write the data to a temp file and compute the MD5
                  * digest as we write the file.
                  */
-                if ( bpc_fileZIO_open(&info->fd, info->tmpFileName, 1, info->compress) ) {
+                if ( bpc_fileZIO_open(&info->fd, info->tmpFileName->s, 1, info->compress) ) {
                     info->errorCnt++;
-                    bpc_logErrf("bpc_poolWrite_write: can't open/create %s for writing", info->tmpFileName);
+                    bpc_logErrf("bpc_poolWrite_write: can't open/create %s for writing", info->tmpFileName->s);
                     return -1;
                 }
                 info->fdOpen = 1;
@@ -235,7 +235,7 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                     if ( (writeRet = bpc_fileZIO_write(&info->fd, info->buffer, info->bufferIdx)) != (signed)info->bufferIdx ) {
                         info->errorCnt++;
                         bpc_logErrf("bpc_poolWrite_write: write of %lu bytes to %s failed, return = %d",
-                                                    (unsigned long)info->bufferIdx, info->tmpFileName, (int)writeRet);
+                                                    (unsigned long)info->bufferIdx, info->tmpFileName->s, (int)writeRet);
                         return -1;
                     }
                     md5_update(&info->md5, info->buffer, info->bufferIdx);
@@ -281,7 +281,7 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
             if ( (writeRet = bpc_fileZIO_write(&info->fd, data, dataLen)) != (ssize_t)dataLen ) {
                 info->errorCnt++;
                 bpc_logErrf("bpc_poolWrite_write: write of %lu bytes to %s failed, return = %d",
-                                            (unsigned long)dataLen, info->tmpFileName, (int)writeRet);
+                                            (unsigned long)dataLen, info->tmpFileName->s, (int)writeRet);
                 return -1;
             }
             md5_update(&info->md5, data, dataLen);
@@ -292,9 +292,9 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
              * Compute the digests too.
              */
             bpc_fileZIO_close(&info->fd);
-            if ( bpc_fileZIO_open(&info->fd, info->tmpFileName, 0, info->compress) ) {
+            if ( bpc_fileZIO_open(&info->fd, info->tmpFileName->s, 0, info->compress) ) {
                 info->errorCnt++;
-                bpc_logErrf("bpc_poolWrite_write: can't open %s for reading", info->tmpFileName);
+                bpc_logErrf("bpc_poolWrite_write: can't open %s for reading", info->tmpFileName->s);
                 return -1;
             }
             info->fdOpen = 1;
@@ -318,7 +318,7 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
     }
     if ( info->state == 2 ) {
         uint32 ext = 0;
-        char poolPath[BPC_MAXPATHLEN];
+        bpc_strBuf *poolPath = bpc_strBuf_new();
         STRUCT_STAT st;
 
         /*
@@ -354,12 +354,12 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
              * pool files that will be deleted next time BackupPC_refCountUpdate
              * runs, so resetting that bit prevents the deletion.
              */
-            if ( stat(poolPath, &st) ) break;
+            if ( stat(poolPath->s, &st) ) break;
             if ( S_ISREG(st.st_mode) ) {
                 if ( st.st_size > 0 ) {
                     bpc_candidate_file *candidateFile;
-                    if ( (st.st_mode & S_IXOTH) && bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
-                        bpc_logErrf("Couldn't unmark candidate matching file %s (skipped; errno = %d)\n", poolPath, errno);
+                    if ( (st.st_mode & S_IXOTH) && bpc_poolWrite_unmarkPendingDelete(poolPath->s) ) {
+                        bpc_logErrf("Couldn't unmark candidate matching file %s (skipped; errno = %d)\n", poolPath->s, errno);
                         info->errorCnt++;
                         break;
                     }
@@ -367,15 +367,17 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                     if ( !candidateFile ) {
                         info->errorCnt++;
                         bpc_logErrf("bpc_poolWrite_write: can't allocate bpc_candidate_file\n");
+                        bpc_strBuf_free(poolPath);
                         return -1;
                     }
                     candidateFile->digest   = info->digest;
                     candidateFile->fileSize = st.st_size;
                     candidateFile->v3File   = 0;
-                    strcpy(candidateFile->fileName, poolPath);
+                    candidateFile->fileName = bpc_strBuf_new();
+                    bpc_strBuf_strcpy(candidateFile->fileName, 0, poolPath->s);
                     candidateFile->next = info->candidateList;
                     info->candidateList = candidateFile;
-                    if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Candidate matching file %s\n", candidateFile->fileName);
+                    if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Candidate matching file %s\n", candidateFile->fileName->s);
                 } else if ( info->digestExtZeroLen < 0 ) {
                     /*
                      * Remember the first empty file in case we have to insert a
@@ -413,26 +415,29 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                  *    odds.  Other design steps eliminate the remaining
                  *    race conditions of linking vs removing.
                  */
-                if ( stat(poolPath, &st) ) break;
+                if ( stat(poolPath->s, &st) ) break;
                 if ( S_ISREG(st.st_mode)
                         && 1 < st.st_nlink && st.st_nlink < (unsigned)BPC_HardLinkMax ) {
                     bpc_candidate_file *candidateFile = malloc(sizeof(bpc_candidate_file));
                     if ( !candidateFile ) {
                         info->errorCnt++;
                         bpc_logErrf("bpc_poolWrite_write: can't allocate bpc_candidate_file\n");
+                        bpc_strBuf_free(poolPath);
                         return -1;
                     }
                     candidateFile->digest   = info->digest_v3;
                     candidateFile->fileSize = st.st_size;
                     candidateFile->v3File   = 1;
-                    strcpy(candidateFile->fileName, poolPath);
+                    candidateFile->fileName = bpc_strBuf_new();
+                    bpc_strBuf_strcpy(candidateFile->fileName, 0, poolPath->s);
                     candidateFile->next = info->candidateList;
                     info->candidateList = candidateFile;
-                    if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Candidate v3 matching file %s\n", candidateFile->fileName);
+                    if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Candidate v3 matching file %s\n", candidateFile->fileName->s);
                 }
             }
             bpc_digest_append_ext(&info->digest_v3, 0);
         }
+        bpc_strBuf_free(poolPath);
         /*
          * Open the first set of candidate files.
          */
@@ -467,10 +472,11 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                  * Try to read an extra byte when we expect EOF, to make sure the candidate file is also at EOF
                  */
                 nread1 = bpc_fileZIO_read(&info->match[i].fd, buf1, nread0 > 0 ? nread0 : 1);
-                if ( BPC_LogLevel >= 9 ) bpc_logMsgf("Read %d bytes of %d from match[%d] (%s)\n", (int)nread1, (int)nread0, i, info->match[i].fileName);
+                if ( BPC_LogLevel >= 9 ) bpc_logMsgf("Read %d bytes of %d from match[%d] (%s)\n", (int)nread1, (int)nread0, i, info->match[i].fileName->s);
                 if ( nread0 != nread1 || (nread0 > 0 && memcmp(buf, buf1, nread0)) ) {
                     bpc_fileZIO_close(&info->match[i].fd);
                     if ( BPC_LogLevel >= 8 ) bpc_logMsgf("match[%d] no longer matches\n", i);
+                    bpc_strBuf_free(info->match[i].fileName);
                     info->match[i].used = 0;
                     replaceCnt++;
                 }
@@ -506,16 +512,16 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
              * Need to write a new file if not written already
              */
             if ( !info->fdOpen && info->fileSize > 0 ) {
-                if ( bpc_fileZIO_open(&info->fd, info->tmpFileName, 1, info->compress) ) {
+                if ( bpc_fileZIO_open(&info->fd, info->tmpFileName->s, 1, info->compress) ) {
                     info->errorCnt++;
-                    bpc_logErrf("bpc_poolWrite_write: can't open/create %s for writing", info->tmpFileName);
+                    bpc_logErrf("bpc_poolWrite_write: can't open/create %s for writing", info->tmpFileName->s);
                     return -1;
                 }
                 if ( info->bufferIdx > 0 ) {
                     if ( (writeRet = bpc_fileZIO_write(&info->fd, info->buffer, info->bufferIdx)) != (ssize_t)info->bufferIdx ) {
                         info->errorCnt++;
                         bpc_logErrf("bpc_poolWrite_write: write of %u bytes to %s failed, return = %d",
-                                                    info->bufferIdx, info->tmpFileName, (int)writeRet);
+                                                    info->bufferIdx, info->tmpFileName->s, (int)writeRet);
                         return -1;
                     }
                 }
@@ -525,8 +531,8 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                 char hexStr[BPC_DIGEST_LEN_MAX * 2 + 1];
                 bpc_digest_append_ext(&info->digest, 0);
                 bpc_digest_digest2str(&info->digest, hexStr);
-                if ( BPC_LogLevel >= 5 ) bpc_logMsgf("No match... adding %s to pool (digest = %s)\n", info->tmpFileName, hexStr);
-                bpc_poolWrite_addToPool(info, info->tmpFileName, 0);
+                if ( BPC_LogLevel >= 5 ) bpc_logMsgf("No match... adding %s to pool (digest = %s)\n", info->tmpFileName->s, hexStr);
+                bpc_poolWrite_addToPool(info, info->tmpFileName->s, 0);
             } else {
                 if ( BPC_LogLevel >= 5 ) bpc_logMsgf("Zero length file - don't match anything\n");
                 info->digest.len   = 0;
@@ -544,10 +550,10 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
                 bpc_digest_digest2str(&info->digest, hexStr);
                 bpc_logErrf("bpc_poolWrite_write: got %d matching files for digest %s\n", nMatch, hexStr);
             }
-            if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Found match with match[%d] (%s)\n", iMatch, info->match[iMatch].fileName);
+            if ( BPC_LogLevel >= 7 ) bpc_logMsgf("Found match with match[%d] (%s)\n", iMatch, info->match[iMatch].fileName->s);
             if ( info->match[iMatch].v3File ) {
                 bpc_digest_append_ext(&info->digest, 0);
-                bpc_poolWrite_addToPool(info, info->match[iMatch].fileName, info->match[iMatch].v3File);
+                bpc_poolWrite_addToPool(info, info->match[iMatch].fileName->s, info->match[iMatch].v3File);
             } else {
                 info->digest       = info->match[iMatch].digest;
                 info->retValue     = 1;
@@ -555,7 +561,7 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
             }
             if ( info->fdOpen ) {
                 bpc_fileZIO_close(&info->fd);
-                unlink(info->tmpFileName);
+                unlink(info->tmpFileName->s);
                 info->fdOpen = 0;
             }
         }
@@ -565,24 +571,27 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
 
 int bpc_poolWrite_createPoolDir(bpc_poolWrite_info *info, bpc_digest *digest)
 {
-    char path[BPC_MAXPATHLEN], *p;
+    bpc_strBuf *path = bpc_strBuf_new();
+    char *p;
     int ret;
 
     /*
      * get the full path, and prune off the file name to get the directory
      */
     bpc_digest_md52path(path, info->compress, digest);
-    if ( !(p = strrchr(path, '/')) ) {
+    if ( !(p = strrchr(path->s, '/')) ) {
         info->errorCnt++;
-        bpc_logErrf("bpc_poolWrite_createPoolDir: can't find trailing / in path %s", path);
+        bpc_logErrf("bpc_poolWrite_createPoolDir: can't find trailing / in path %s", path->s);
+        bpc_strBuf_free(path);
         return -1;
     }
     *p = '\0';
 
-    if ( (ret = bpc_path_create(path)) ) {
+    if ( (ret = bpc_path_create(path->s)) ) {
         info->errorCnt++;
-        bpc_logErrf("bpc_poolWrite_createPoolDir: can't create directory path %s", path);
+        bpc_logErrf("bpc_poolWrite_createPoolDir: can't create directory path %s", path->s);
     }
+    bpc_strBuf_free(path);
     return ret;
 }
 
@@ -596,13 +605,16 @@ void bpc_poolWrite_cleanup(bpc_poolWrite_info *info)
     while ( info->candidateList ) {
         bpc_candidate_file *candidateFile = info->candidateList;
         info->candidateList = candidateFile->next;
+        bpc_strBuf_free(candidateFile->fileName);
         free(candidateFile);
     }
     for ( i = 0 ; i < BPC_POOL_WRITE_CONCURRENT_MATCH ; i++ ) {
         if ( !info->match[i].used ) continue;
         bpc_fileZIO_close(&info->match[i].fd);
+        bpc_strBuf_free(info->match[i].fileName);
         info->match[i].used = 0;
     }
+    bpc_strBuf_free(info->tmpFileName);
     if ( info->buffer ) {
         *(void**)info->buffer = DataBufferFreeList;
         DataBufferFreeList  = info->buffer;
@@ -656,7 +668,7 @@ void bpc_poolWrite_repeatPoolWrite(bpc_poolWrite_info *info, char *fileNameTmp)
         unlink(fileNameTmp);
         return;
     }
-    strcpy(info->tmpFileName, fileNameTmp);
+    bpc_strBuf_strcpy(info->tmpFileName, 0, fileNameTmp);
     if ( bpc_fileZIO_open(&info->fd, fileNameTmp, 0, info->compress) < 0 ) {
         bpc_logErrf("bpc_poolWrite_repeatPoolWrite: can't open %s for reading", fileNameTmp);
         info->errorCnt++;
@@ -713,7 +725,7 @@ int bpc_poolWrite_copyToPool(bpc_poolWrite_info *info, char *poolPath, char *fil
 void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3PoolFile)
 {
     STRUCT_STAT st;
-    char poolPath[BPC_MAXPATHLEN];
+    bpc_strBuf *poolPath = bpc_strBuf_new();
     int redo = 0;
 
     if ( bpc_poolWrite_createPoolDir(info, &info->digest) ) return;
@@ -727,14 +739,14 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
     if ( info->digestExtZeroLen >= 0 ) {
         bpc_digest_append_ext(&info->digest, info->digestExtZeroLen);
         bpc_digest_md52path(poolPath, info->compress, &info->digest);
-        if ( stat(poolPath, &st) || st.st_size != 0 ) {
+        if ( stat(poolPath->s, &st) || st.st_size != 0 ) {
             redo = 1;
         }
     }
     if ( !redo ) {
         bpc_digest_append_ext(&info->digest, info->digestExtOpen);
         bpc_digest_md52path(poolPath, info->compress, &info->digest);
-        if ( !stat(poolPath, &st) ) {
+        if ( !stat(poolPath->s, &st) ) {
             redo = 1;
         }
     }
@@ -743,7 +755,7 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
      * Try to insert the new file at the zero-length file slot (if present).
      */
     if ( !redo && info->digestExtZeroLen >= 0 ) {
-        char lockFile[BPC_MAXPATHLEN];
+        bpc_strBuf *lockFile = bpc_strBuf_new();
         int lockFd;
         /*
          * We can replace a zero-length file, but only via locking to
@@ -758,14 +770,14 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
          */
         bpc_digest_append_ext(&info->digest, info->digestExtZeroLen);
         bpc_digest_md52path(poolPath, info->compress, &info->digest);
-        if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_poolWrite_addToPool: replacing empty pool file %s with %s\n", poolPath, fileName);
-        snprintf(lockFile, BPC_MAXPATHLEN, "%s.lock", poolPath);
-        lockFd = bpc_lockRangeFile(lockFile, 0, 1, 1);
+        if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_poolWrite_addToPool: replacing empty pool file %s with %s\n", poolPath->s, fileName);
+        bpc_strBuf_snprintf(lockFile, 0, "%s.lock", poolPath->s);
+        lockFd = bpc_lockRangeFile(lockFile->s, 0, 1, 1);
         /*
          * If we don't have the lock, or the file is no longer zero length, or the rename fails,
          * then try again.
          */
-        if ( lockFd < 0 || stat(poolPath, &st) || st.st_size != 0 || rename(fileName, poolPath) ) {
+        if ( lockFd < 0 || stat(poolPath->s, &st) || st.st_size != 0 || rename(fileName, poolPath->s) ) {
             if ( BPC_LogLevel >= 5 ) {
                 bpc_logMsgf("bpc_poolWrite_addToPool: lock/rename failed: need to repeat write (lockFd = %d, size = %lu, errno = %d)\n",
                              lockFd, (unsigned long)st.st_size, errno);
@@ -773,16 +785,19 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
             if ( lockFd >= 0 ) {
                 bpc_unlockRangeFile(lockFd);
             }
-            unlink(lockFile);
+            unlink(lockFile->s);
             redo = 1;
         } else {
-            stat(poolPath, &st);
+            stat(poolPath->s, &st);
             info->retValue     = v3PoolFile ? 2 : 0;
             info->poolFileSize = st.st_size;
             bpc_unlockRangeFile(lockFd);
-            unlink(lockFile);
+            unlink(lockFile->s);
+            bpc_strBuf_free(poolPath);
+            bpc_strBuf_free(lockFile);
             return;
         }
+        bpc_strBuf_free(lockFile);
     }
 
     /*
@@ -802,14 +817,15 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
         if ( stat(fileName, &st) ) {
             info->errorCnt++;
             bpc_logErrf("bpc_poolWrite_addToPool: can't stat %s\n", fileName);
+            bpc_strBuf_free(poolPath);
             return;
         }
         fileIno = st.st_ino;
-        linkOk = !link(fileName, poolPath);
-        if ( !(statOk = !stat(poolPath, &st)) ) linkOk = 0;
+        linkOk = !link(fileName, poolPath->s);
+        if ( !(statOk = !stat(poolPath->s, &st)) ) linkOk = 0;
         poolIno = st.st_ino;
         if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_poolWrite_addToPool: link %s -> %s (linkOk = %d, statOk = %d, ino = %lu/%lu)\n",
-                                                poolPath, fileName, linkOk, statOk, (unsigned long)fileIno, (unsigned long)poolIno);
+                                                poolPath->s, fileName, linkOk, statOk, (unsigned long)fileIno, (unsigned long)poolIno);
 
         /*
          * make sure the link really worked by checking inode numbers
@@ -822,6 +838,7 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
             unlink(fileName);
             info->retValue     = v3PoolFile ? 2 : 0;
             info->poolFileSize = st.st_size;
+            bpc_strBuf_free(poolPath);
             return;
         }
         /*
@@ -836,11 +853,12 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
              * file systems, or the fileName didn't get written.
              * Just copy the file instead (assuming fileName got written).
              */
-            bpc_poolWrite_copyToPool(info, poolPath, fileName);
+            bpc_poolWrite_copyToPool(info, poolPath->s, fileName);
+            bpc_strBuf_free(poolPath);
             return;
         }
     }
-
+    bpc_strBuf_free(poolPath);
     /*
      * We need to redo the pool write, since it appears someone else has added
      * a pool file with the same digest.
@@ -857,7 +875,8 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
  */
 int bpc_poolWrite_unmarkPendingDelete(char *poolPath)
 {
-    char lockFile[BPC_MAXPATHLEN], *p;
+    bpc_strBuf *lockFile = bpc_strBuf_new();
+    char *p;
     STRUCT_STAT st;
     int lockFd;
 
@@ -865,12 +884,16 @@ int bpc_poolWrite_unmarkPendingDelete(char *poolPath)
      * The lock file is in the first level of pool sub directories - one level
      * up from the full path.  So we need to find the 2nd last '/'.
      */
-    snprintf(lockFile, BPC_MAXPATHLEN, "%s", poolPath);
-    if ( !(p = strrchr(lockFile, '/')) ) return -1;
+    bpc_strBuf_snprintf(lockFile, 0, "%s", poolPath);
+    if ( !(p = strrchr(lockFile->s, '/')) ) return -1;
     *p = '\0';
-    if ( !(p = strrchr(lockFile, '/')) ) return -1;
-    snprintf(p + 1, BPC_MAXPATHLEN - (p + 1 - lockFile), "%s", "LOCK");
-    if ( (lockFd = bpc_lockRangeFile(lockFile, 0, 1, 1)) < 0 ) return -1;
+    if ( !(p = strrchr(lockFile->s, '/')) ) return -1;
+    bpc_strBuf_strcpy(lockFile, p + 1 - lockFile->s, "LOCK");
+    if ( (lockFd = bpc_lockRangeFile(lockFile->s, 0, 1, 1)) < 0 ) {
+        bpc_strBuf_free(lockFile);
+        return -1;
+    }
+    bpc_strBuf_free(lockFile);
     if ( !stat(poolPath, &st) && !chmod(poolPath, st.st_mode & ~S_IXOTH & ~S_IFMT) ) {
         if ( BPC_LogLevel >= 7 ) bpc_logMsgf("bpc_poolWrite_unmarkPendingDelete(%s) succeeded\n", poolPath);
         bpc_unlockRangeFile(lockFd);

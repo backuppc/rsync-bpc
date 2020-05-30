@@ -75,50 +75,38 @@ int bpc_path_create(char *path)
  */
 int bpc_path_remove(bpc_deltaCount_info *deltaInfo, char *path, int compress)
 {
-    char filePath[BPC_MAXPATHLEN];
+    bpc_strBuf *filePath, *dirList;
+    size_t dirListLen = 0;
     STRUCT_STAT st;
     DIR *dir;
     struct dirent *dp;
     int errorCnt = 0;
-    size_t dirListSize = 0, dirListLen = 0;
-    char *dirList = NULL, *dirListP;
 
     if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_path_remove(%s)\n", path);
     if ( !(dir = opendir(path)) ) {
         unlink(path);
         return errorCnt;
     }
+    filePath = bpc_strBuf_new();
+    dirList = bpc_strBuf_new();
     while ( (dp = readdir(dir)) ) {
         if ( !strcmp(dp->d_name, ".") || !strcmp(dp->d_name, "..") ) continue;
-        snprintf(filePath, sizeof(filePath), "%s/%s", path, dp->d_name);
-        if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_path_remove: removing %s\n", filePath);
-        if ( stat(filePath, &st) ) {
+        bpc_strBuf_snprintf(filePath, 0, "%s/%s", path, dp->d_name);
+        if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_path_remove: removing %s\n", filePath->s);
+        if ( stat(filePath->s, &st) ) {
             /*
              * hmmm.  stat failed - just try to remove it
              */
-            unlink(filePath);
+            unlink(filePath->s);
             continue;
         }
         if ( S_ISDIR(st.st_mode) ) {
             /*
              * To avoid recursing with dir still open (consuming an open fd), remember all the dirs
-             * and recurse after we close dir.
+             * and recurse after we close dir.  We concatenate the '\0' terminated strings,
+             * keeping the '\0' (can't use bpc_strBuf_strcat()).
              */
-            if ( !dirList ) {
-                dirListSize = 4096;
-                if ( !(dirList = malloc(dirListSize)) ) {
-                    bpc_logErrf("bpc_path_remove: can't allocate %u bytes\n", (unsigned)dirListSize);
-                    return ++errorCnt;
-                }
-            }
-            if ( dirListLen + strlen(dp->d_name) + 1 >= dirListSize ) {
-                dirListSize = dirListSize * 2 + strlen(dp->d_name);
-                if ( !(dirList = realloc(dirList, dirListSize)) ) {
-                    bpc_logErrf("bpc_path_remove: can't reallocate %u bytes\n", (unsigned)dirListSize);
-                    return ++errorCnt;
-                }
-            }
-            strcpy(dirList + dirListLen, dp->d_name);
+            bpc_strBuf_strcpy(dirList, dirListLen, dp->d_name);
             dirListLen += strlen(dp->d_name) + 1;
         } else {
             /*
@@ -128,12 +116,12 @@ int bpc_path_remove(bpc_deltaCount_info *deltaInfo, char *path, int compress)
                 bpc_attrib_dir dir;
 
                 bpc_attrib_dirInit(&dir, compress);
-                if ( bpc_attrib_dirRead(&dir, NULL, filePath, 0) ) {
-                    bpc_logErrf("bpc_path_remove: can't read attrib file %s\n", filePath);
+                if ( bpc_attrib_dirRead(&dir, NULL, filePath->s, 0) ) {
+                    bpc_logErrf("bpc_path_remove: can't read attrib file %s\n", filePath->s);
                     errorCnt++;
                 }
-                if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_path_remove: adjusting ref counts from attrib file %s\n", filePath);
-                if ( !unlink(filePath) ) {
+                if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_path_remove: adjusting ref counts from attrib file %s\n", filePath->s);
+                if ( !unlink(filePath->s) ) {
                     /*
                      * Only reduce the ref counts if we succeeded in removing the attrib file
                      */
@@ -141,7 +129,7 @@ int bpc_path_remove(bpc_deltaCount_info *deltaInfo, char *path, int compress)
                 }
                 bpc_attrib_dirDestroy(&dir);
             } else {
-                if ( unlink(filePath) ) errorCnt++;
+                if ( unlink(filePath->s) ) errorCnt++;
             }
         }
     }
@@ -149,14 +137,16 @@ int bpc_path_remove(bpc_deltaCount_info *deltaInfo, char *path, int compress)
     /*
      * Now visit the subdirs we have saved above.
      */
-    if ( dirList ) {
-        for ( dirListP = dirList ; dirListP < dirList + dirListLen ; dirListP += strlen(dirListP) + 1 ) {
-            snprintf(filePath, sizeof(filePath), "%s/%s", path, dirListP);
-            errorCnt += bpc_path_remove(deltaInfo, filePath, compress);
+    if ( dirListLen > 0 ) {
+        char *dirListP;
+        for ( dirListP = dirList->s ; dirListP < dirList->s + dirListLen ; dirListP += strlen(dirListP) + 1 ) {
+            bpc_strBuf_snprintf(filePath, 0, "%s/%s", path, dirListP);
+            errorCnt += bpc_path_remove(deltaInfo, filePath->s, compress);
         }
-        free(dirList);
     }
     if ( rmdir(path) ) errorCnt++;
+    bpc_strBuf_free(filePath);
+    bpc_strBuf_free(dirList);
     return errorCnt;
 }
 
@@ -166,43 +156,31 @@ int bpc_path_remove(bpc_deltaCount_info *deltaInfo, char *path, int compress)
  */
 int bpc_path_refCountAllInodeMax(bpc_deltaCount_info *deltaInfo, char *path, int compress, int incr, unsigned int *inodeMax)
 {
-    char filePath[BPC_MAXPATHLEN];
+    bpc_strBuf *filePath, *dirList;
+    size_t dirListLen = 0;
     STRUCT_STAT st;
     DIR *dir;
     struct dirent *dp;
     int errorCnt = 0;
-    size_t dirListSize = 0, dirListLen = 0;
-    char *dirList = NULL, *dirListP;
 
     if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_path_refCountAll(%s)\n", path);
     if ( !(dir = opendir(path)) ) {
         return errorCnt;
     }
+    filePath = bpc_strBuf_new();
+    dirList = bpc_strBuf_new();
     while ( (dp = readdir(dir)) ) {
         if ( !strcmp(dp->d_name, ".") || !strcmp(dp->d_name, "..") ) continue;
-        snprintf(filePath, sizeof(filePath), "%s/%s", path, dp->d_name);
-        if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_path_refCountAll: got %s\n", filePath);
-        if ( stat(filePath, &st) ) continue;
+        bpc_strBuf_snprintf(filePath, 0, "%s/%s", path, dp->d_name);
+        if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_path_refCountAll: got %s\n", filePath->s);
+        if ( stat(filePath->s, &st) ) continue;
         if ( S_ISDIR(st.st_mode) ) {
             /*
              * To avoid recursing with dir still open (consuming an open fd), remember all the dirs
-             * and recurse after we close dir.
+             * and recurse after we close dir.  We concatenate the '\0' terminated strings,
+             * keeping the '\0' (can't use bpc_strBuf_strcat()).
              */
-            if ( !dirList ) {
-                dirListSize = 4096;
-                if ( !(dirList = malloc(dirListSize)) ) {
-                    bpc_logErrf("bpc_path_refCountAll: can't allocate %u bytes\n", (unsigned)dirListSize);
-                    return ++errorCnt;
-                }
-            }
-            if ( dirListLen + strlen(dp->d_name) + 1 >= dirListSize ) {
-                dirListSize = dirListSize * 2 + strlen(dp->d_name);
-                if ( !(dirList = realloc(dirList, dirListSize)) ) {
-                    bpc_logErrf("bpc_path_refCountAll: can't reallocate %u bytes\n", (unsigned)dirListSize);
-                    return ++errorCnt;
-                }
-            }
-            strcpy(dirList + dirListLen, dp->d_name);
+            bpc_strBuf_strcpy(dirList, dirListLen, dp->d_name);
             dirListLen += strlen(dp->d_name) + 1;
         } else {
             /*
@@ -213,10 +191,10 @@ int bpc_path_refCountAllInodeMax(bpc_deltaCount_info *deltaInfo, char *path, int
 
                 bpc_attrib_dirInit(&dir, compress);
                 if ( bpc_attrib_dirRead(&dir, path, dp->d_name, 0) ) {
-                    bpc_logErrf("bpc_path_refCountAll: can't read attrib file %s\n", filePath);
+                    bpc_logErrf("bpc_path_refCountAll: can't read attrib file %s\n", filePath->s);
                     errorCnt++;
                 } else {
-                    if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_path_refCountAll: adjusting ref counts from attrib file %s\n", filePath);
+                    if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_path_refCountAll: adjusting ref counts from attrib file %s\n", filePath->s);
                     bpc_attrib_dirRefCountInodeMax(deltaInfo, &dir, incr, inodeMax);
                 }
                 bpc_attrib_dirDestroy(&dir);
@@ -227,13 +205,15 @@ int bpc_path_refCountAllInodeMax(bpc_deltaCount_info *deltaInfo, char *path, int
     /*
      * Now visit the subdirs we have saved above.
      */
-    if ( dirList ) {
-        for ( dirListP = dirList ; dirListP < dirList + dirListLen ; dirListP += strlen(dirListP) + 1 ) {
-            snprintf(filePath, sizeof(filePath), "%s/%s", path, dirListP);
-            errorCnt += bpc_path_refCountAllInodeMax(deltaInfo, filePath, compress, incr, inodeMax);
+    if ( dirListLen > 0 ) {
+        char *dirListP;
+        for ( dirListP = dirList->s ; dirListP < dirList->s + dirListLen ; dirListP += strlen(dirListP) + 1 ) {
+            bpc_strBuf_snprintf(filePath, 0, "%s/%s", path, dirListP);
+            errorCnt += bpc_path_refCountAllInodeMax(deltaInfo, filePath->s, compress, incr, inodeMax);
         }
-        free(dirList);
     }
+    bpc_strBuf_free(filePath);
+    bpc_strBuf_free(dirList);
     return errorCnt;
 }
 

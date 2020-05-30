@@ -246,14 +246,16 @@ int bpc_poolRefFileWrite(bpc_refCount_info *info, char *fileName)
         /*
          * Maybe the directory doesn't exist - try to create it and try again
          */
-        char dir[BPC_MAXPATHLEN], *p;
+        bpc_strBuf *dir = bpc_strBuf_new();
+        char *p;
 
-        snprintf(dir, sizeof(dir), "%s", fileName);
-        if ( (p = strrchr(dir, '/')) ) {
+        bpc_strBuf_snprintf(dir, 0, "%s", fileName);
+        if ( (p = strrchr(dir->s, '/')) ) {
             *p = '\0';
-            bpc_path_create(dir);
+            bpc_path_create(dir->s);
             out.fd = open(fileName, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         }
+        bpc_strBuf_free(dir);
         if ( out.fd < 0 ) {
             bpc_logErrf("bpc_poolRefFileWrite: can't open/create pool delta file name %s (errno %d)\n", fileName, errno);
             out.errorCnt++;
@@ -360,13 +362,14 @@ int bpc_poolRefFileRead(bpc_refCount_info *info, char *fileName)
  */
 void bpc_poolRefRequestFsck(char *backupDir, int ext)
 {
-    char fileName[BPC_MAXPATHLEN];
+    bpc_strBuf *fileName = bpc_strBuf_new();
     int fd;
 
-    snprintf(fileName, sizeof(fileName), "%s/refCnt/needFsck%d", backupDir, ext);
-    if ( (fd = open(fileName, O_CREAT | O_WRONLY, 0660)) < 0 ) {
-        bpc_logErrf("bpc_poolRefRequestFsck: can't open/create fsck request file %s (errno %d)\n", fileName, errno);
+    bpc_strBuf_snprintf(fileName, 0, "%s/refCnt/needFsck%d", backupDir, ext);
+    if ( (fd = open(fileName->s, O_CREAT | O_WRONLY, 0660)) < 0 ) {
+        bpc_logErrf("bpc_poolRefRequestFsck: can't open/create fsck request file %s (errno %d)\n", fileName->s, errno);
     }
+    bpc_strBuf_free(fileName);
 }
 
 /***********************************************************************
@@ -383,10 +386,8 @@ static int OutputFileCnt = 0;
 
 void bpc_poolRefDeltaFileInit(bpc_deltaCount_info *info, char *hostDir)
 {
-    if ( snprintf(info->targetDir, sizeof(info->targetDir), "%s", hostDir)
-		>= (int)sizeof(info->targetDir) - 1 ) {
-	bpc_logErrf("bpc_poolRefDeltaFileInit: targetDir %s truncated\n", hostDir);
-    }
+    info->targetDir = bpc_strBuf_new();
+    bpc_strBuf_strcpy(info->targetDir, 0, hostDir);
     bpc_poolRefInit(&info->refCnt[0], 256);
     bpc_poolRefInit(&info->refCnt[1], 1 << 20);
     info->refCnt[0].initDone = info->refCnt[1].initDone = 1;
@@ -394,51 +395,47 @@ void bpc_poolRefDeltaFileInit(bpc_deltaCount_info *info, char *hostDir)
 
 void bpc_poolRefDeltaFileDestroy(bpc_deltaCount_info *info)
 {
+    bpc_strBuf_free(info->targetDir);
     bpc_poolRefDestroy(&info->refCnt[0]);
     bpc_poolRefDestroy(&info->refCnt[1]);
 }
 
 uint32 bpc_poolRefDeltaFileFlush(bpc_deltaCount_info *info)
 {
-    char tempFileName[BPC_MAXPATHLEN], finalFileName[BPC_MAXPATHLEN];
+    bpc_strBuf *tempFileName, *finalFileName;
     int compress;
     int errorCnt = 0;
     int fd;
 
     if ( !info ) info = &DeltaInfoOld;         /* backward compatibility */
     if ( !info->refCnt[0].initDone ) return 1;
+    tempFileName = bpc_strBuf_new();
+    finalFileName = bpc_strBuf_new();
     for ( compress = 0 ; compress < 2 ; compress++ ) {
         uint entryCnt = bpc_hashtable_entryCount(&info->refCnt[compress].ht);
 
         if ( entryCnt == 0 ) continue;
 
         do {
-            if ( snprintf(tempFileName, sizeof(tempFileName), "%s/refCnt/tpoolCntDelta_%d_%d_%d_%d",
-                          info->targetDir, compress, BPC_TmpFileUnique, OutputFileCnt, getpid()) >= (int)sizeof(tempFileName) - 1 ) {
-                bpc_logErrf("bpc_poolRefDeltaFileFlush: pool delta file name %s truncated\n", tempFileName);
-                errorCnt++;
-            }
-            if ( (fd = open(tempFileName, O_RDONLY, 0666)) >= 0 ) {
+            bpc_strBuf_snprintf(tempFileName, 0, "%s/refCnt/tpoolCntDelta_%d_%d_%d_%d",
+                                info->targetDir->s, compress, BPC_TmpFileUnique, OutputFileCnt, getpid());
+            if ( (fd = open(tempFileName->s, O_RDONLY, 0666)) >= 0 ) {
                 close(fd);
                 OutputFileCnt++;
             }
         } while ( fd >= 0 );
 
-        errorCnt += bpc_poolRefFileWrite(&info->refCnt[compress], tempFileName);
-
-        if ( snprintf(finalFileName, sizeof(finalFileName), "%s/refCnt/poolCntDelta_%d_%d_%d_%d",
-                      info->targetDir, compress, BPC_TmpFileUnique >= 0 ? BPC_TmpFileUnique : 0,
-                      OutputFileCnt, getpid()) >= (int)sizeof(finalFileName) - 1 ) {
-            bpc_logErrf("bpc_poolRefDeltaFileFlush: pool delta file name %s truncated\n", finalFileName);
-            errorCnt++;
-        }
+        errorCnt += bpc_poolRefFileWrite(&info->refCnt[compress], tempFileName->s);
         if ( errorCnt ) {
-            unlink(tempFileName);
+            unlink(tempFileName->s);
             continue;
         }
-        if ( rename(tempFileName, finalFileName) != 0 ) {
-            bpc_logErrf("bpc_poolRefDeltaFileFlush: can't rename %s to %s (errno %d)\n", tempFileName, finalFileName, errno);
-            unlink(tempFileName);
+
+        bpc_strBuf_snprintf(finalFileName, 0, "%s/refCnt/poolCntDelta_%d_%d_%d_%d",
+                            info->targetDir->s, compress, BPC_TmpFileUnique >= 0 ? BPC_TmpFileUnique : 0, OutputFileCnt, getpid());
+        if ( rename(tempFileName->s, finalFileName->s) != 0 ) {
+            bpc_logErrf("bpc_poolRefDeltaFileFlush: can't rename %s to %s (errno %d)\n", tempFileName->s, finalFileName->s, errno);
+            unlink(tempFileName->s);
             errorCnt++;
         }
         if ( !errorCnt ) {
@@ -450,8 +447,10 @@ uint32 bpc_poolRefDeltaFileFlush(bpc_deltaCount_info *info)
         /*
          * Need to fsck this particular backup on this host
          */
-        bpc_poolRefRequestFsck(info->targetDir, getpid());
+        bpc_poolRefRequestFsck(info->targetDir->s, getpid());
     }
+    bpc_strBuf_free(tempFileName);
+    bpc_strBuf_free(finalFileName);
     return errorCnt;
 }
 

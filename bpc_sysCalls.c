@@ -77,26 +77,27 @@ void bpc_sysCall_init(
             int logLevel                /* logging level */
         )
 {
-    static char hostDir[BPC_MAXPATHLEN];
+    bpc_strBuf *hostDir = bpc_strBuf_new();
     extern int BPC_HardLinkMax;
     extern int BPC_PoolV3Enabled;
 
     bpc_logMsgCBSet(logMsgCB);
     bpc_lib_conf_init(topDir, BPC_HardLinkMax, BPC_PoolV3Enabled, logLevel);
     bpc_attribCache_init(&acNew, hostName, newBkupNum, shareNameUM, newCompress);
-    snprintf(hostDir, sizeof(hostDir), "%s/pc/%s/%d", topDir, hostName, newBkupNum);
-    bpc_poolRefDeltaFileInit(&DeltaNew, hostDir);
+    bpc_strBuf_snprintf(hostDir, 0, "%s/pc/%s/%d", topDir, hostName, newBkupNum);
+    bpc_poolRefDeltaFileInit(&DeltaNew, hostDir->s);
     bpc_attribCache_setDeltaInfo(&acNew, &DeltaNew);
     CompressLevel = newCompress;
     if ( prevBkupNum >= 0 ) {
         bpc_attribCache_init(&acOld, hostName, prevBkupNum, shareNameUM, prevCompress);
-        snprintf(hostDir, sizeof(hostDir), "%s/pc/%s/%d", topDir, hostName, prevBkupNum);
-        bpc_poolRefDeltaFileInit(&DeltaOld, hostDir);
+        bpc_strBuf_snprintf(hostDir, 0, "%s/pc/%s/%d", topDir, hostName, prevBkupNum);
+        bpc_poolRefDeltaFileInit(&DeltaOld, hostDir->s);
         bpc_attribCache_setDeltaInfo(&acOld, &DeltaOld);
         acOldUsed = 1;
     } else {
         acOldUsed = 0;
     }
+    bpc_strBuf_free(hostDir);
     Stats.InodeCurr = Stats.Inode0 = inode0;
     LogLevel = logLevel;
     /*
@@ -226,8 +227,8 @@ typedef struct {
     off_t posn;
     off_t fileSize;
     int tmpFd;
-    char *fileName;
-    char *tmpFileName;
+    bpc_strBuf *fileName;
+    bpc_strBuf *tmpFileName;
     char *buffer;
     size_t bufferSize;
     bpc_digest digest;
@@ -266,6 +267,10 @@ static int bpc_fileDescriptorNew(void)
         Fd[MAX_FD-1].fdUnusedNext = -1;
     }
     i = FdUnused;
+    if ( !Fd[i].fileName ) {
+        Fd[i].fileName = bpc_strBuf_new();
+        Fd[i].tmpFileName = bpc_strBuf_new();
+    }
     if ( i >= 0 ) {
         FdUnused = Fd[i].fdUnusedNext;
         return i;
@@ -278,26 +283,20 @@ static int bpc_fileDescriptorNew(void)
 
 static void bpc_fileDescFree(FdInfo *fd)
 {
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_fileDescFree: fdNum = %d, tmpFd = %d, tmpFileName = %s\n", fd->fdNum, fd->tmpFd, fd->tmpFileName ? fd->tmpFileName : "NULL");
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_fileDescFree: fdNum = %d, tmpFd = %d, tmpFileName = %s\n", fd->fdNum, fd->tmpFd, fd->tmpFd >= 0 ? fd->tmpFileName->s : "NULL");
 
     if ( fd->tmpFd >= 0 ) {
+        unlink(fd->tmpFileName->s);
         close(fd->tmpFd);
         fd->tmpFd = -1;
     }
-    if ( fd->fileName ) free(fd->fileName);
     if ( fd->buffer ) {
         *(void**)fd->buffer = DataBufferFreeList;
         DataBufferFreeList  = fd->buffer;
     }
-    if ( fd->tmpFileName ) {
-        unlink(fd->tmpFileName);
-        free(fd->tmpFileName);
-    }
-    fd->used         = 0;
-    fd->fdUnusedNext = FdUnused;
-    fd->fileName     = NULL;
-    fd->buffer       = NULL;
-    fd->tmpFileName  = NULL;
+    fd->used            = 0;
+    fd->buffer          = NULL;
+    fd->fdUnusedNext    = FdUnused;
     FdUnused = fd->fdNum;
 }
 
@@ -322,24 +321,15 @@ static int bpc_fileWriteBuffer(int fdNum, char *buffer, size_t nBytes)
  */
 static int bpc_fileSwitchToDisk(bpc_attribCache_info *ac, FdInfo *fd)
 {
-    char tmpFileName[BPC_MAXPATHLEN];
-
-    snprintf(tmpFileName, BPC_MAXPATHLEN, "%s/rsyncTmp.%d.%d.%d", ac->backupTopDir, getpid(), am_generator, TmpFileCnt++);
-    fd->tmpFileName = malloc(strlen(tmpFileName) + 1);
-    if ( !fd->tmpFileName ) {
-        bpc_logErrf("bpc_fileSwitchToDisk: can't allocated %lu bytes for temp file name\n", (unsigned long)strlen(tmpFileName) + 1);
-        Stats.ErrorCnt++;
-        return -1;
-    }
-    strcpy(fd->tmpFileName, tmpFileName); 
-    if ( (fd->tmpFd = open(fd->tmpFileName, O_RDWR | O_CREAT | O_TRUNC, 0600)) < 0 ) {
-        bpc_logErrf("bpc_fileSwitchToDisk: can't open/create %s for writing\n", fd->tmpFileName);
+    bpc_strBuf_snprintf(fd->tmpFileName, 0, "%s/rsyncTmp.%d.%d.%d", ac->backupTopDir->s, getpid(), am_generator, TmpFileCnt++);
+    if ( (fd->tmpFd = open(fd->tmpFileName->s, O_RDWR | O_CREAT | O_TRUNC, 0600)) < 0 ) {
+        bpc_logErrf("bpc_fileSwitchToDisk: can't open/create %s for writing\n", fd->tmpFileName->s);
         Stats.ErrorCnt++;
         return -1;
     }
     if ( fd->fileSize > 0 && bpc_fileWriteBuffer(fd->tmpFd, fd->buffer, fd->fileSize) ) return -1;
     if ( lseek(fd->tmpFd, fd->posn, SEEK_SET) != fd->posn ) {
-        bpc_logErrf("bpc_fileSwitchToDisk: unable to seek %s to %lu\n", fd->tmpFileName, (unsigned long)fd->posn);
+        bpc_logErrf("bpc_fileSwitchToDisk: unable to seek %s to %lu\n", fd->tmpFileName->s, (unsigned long)fd->posn);
         Stats.ErrorCnt++;
         return -1;
     }
@@ -380,7 +370,6 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
     fd->fdNum      = fdNum;
     fd->flags      = flags;
     fd->dirty      = 0;
-    fd->fileName   = malloc(strlen(fileName) + 1);
     fd->bufferSize = MAX_BUF_SZ;
     if ( DataBufferFreeList ) {
         fd->buffer = DataBufferFreeList;
@@ -389,21 +378,14 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
         fd->buffer = malloc(fd->bufferSize * sizeof(fd->buffer[0]));
     }
     fd->fileSize   = 0;
-    if ( !fd->fileName || !fd->buffer ) {
-        if ( !fd->fileName ) {
-            bpc_logErrf("bpc_fileOpen: fatal error: can't allocate %lu bytes for file %s\n",
-                                strlen(fileName) + 1, fileName);
-        }
-        if ( !fd->buffer ) {
-            bpc_logErrf("bpc_fileOpen: fatal error: can't allocate %lu bytes for data buffer\n", MAX_BUF_SZ);
-        }
+    if ( !fd->buffer ) {
+        bpc_logErrf("bpc_fileOpen: fatal error: can't allocate %lu bytes for data buffer\n", MAX_BUF_SZ);
         bpc_fileDescFree(fd);
         return NULL;
     }
-    strcpy(fd->fileName, fileName);
-
+    bpc_strBuf_strcpy(fd->fileName, 0, fileName);
     if ( file && !(flags & O_TRUNC) && !(file->isTemp && file->size == 0) ) {
-        char fullPath[BPC_MAXPATHLEN];
+        bpc_strBuf *fullPath = bpc_strBuf_new();
         bpc_fileZIO_fd fdz;
 
         /*
@@ -416,12 +398,13 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
             if ( file->digest.len > 0 ) {
                 bpc_digest_md52path(fullPath, file->compress, &file->digest);
             } else {
-                strcpy(fullPath, "/dev/null");
+                bpc_strBuf_strcpy(fullPath, 0, "/dev/null");
             }
-            if ( bpc_fileZIO_open(&fdz, fullPath, 0, file->compress) ) {
-                bpc_logErrf("bpc_fileOpen: can't open pool file %s (from %s, %d, %d)\n", fullPath, fd->fileName, file->compress, file->digest.len);
+            if ( bpc_fileZIO_open(&fdz, fullPath->s, 0, file->compress) ) {
+                bpc_logErrf("bpc_fileOpen: can't open pool file %s (from %s, %d, %d)\n", fullPath->s, fd->fileName->s, file->compress, file->digest.len);
                 Stats.ErrorCnt++;
                 bpc_fileDescFree(fd);
+                bpc_strBuf_free(fullPath);
                 return NULL;
             }
         } else {
@@ -429,14 +412,16 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
              * either we failed to read the digest (eg, missing inode), or it's a V3 file - look in the backup directory
              */
             bpc_attribCache_getFullMangledPath(&acNew, fullPath, (char*)fileName, file->backupNum);
-            if ( bpc_fileZIO_open(&fdz, fullPath, 0, file->compress) ) {
+            if ( bpc_fileZIO_open(&fdz, fullPath->s, 0, file->compress) ) {
                 bpc_logErrf("bpc_fileOpen: can't open file %s (from %s, %d, %d, %d)\n",
-                            fullPath, fd->fileName, file->compress, file->digest.len, file->nlinks);
+                            fullPath->s, fd->fileName->s, file->compress, file->digest.len, file->nlinks);
                 Stats.ErrorCnt++;
                 bpc_fileDescFree(fd);
+                bpc_strBuf_free(fullPath);
                 return NULL;
             }
         }
+        bpc_strBuf_free(fullPath);
         fd->fileSize = bpc_fileZIO_read(&fdz, (uchar*)fd->buffer, fd->bufferSize);
         if ( fd->fileSize >= (off_t)fd->bufferSize ) {
             off_t nRead;
@@ -462,7 +447,7 @@ static FdInfo *bpc_fileOpen(bpc_attribCache_info *ac, char *fileName, int flags)
     }
     if ( fd->tmpFd >= 0 ) {
         if ( !(flags & O_APPEND) && lseek(fd->tmpFd, 0, SEEK_SET) != 0 ) {
-            bpc_logErrf("bpc_fileOpen: can't seek to start of file %s\n", fd->tmpFileName);
+            bpc_logErrf("bpc_fileOpen: can't seek to start of file %s\n", fd->tmpFileName->s);
             Stats.ErrorCnt++;
             bpc_fileDescFree(fd);
             return NULL;
@@ -504,7 +489,7 @@ static int bpc_fileClose(bpc_attribCache_info *ac, FdInfo *fd, int newType, int 
     off_t poolFileSize;
     int errorCnt;
 
-    file = bpc_attribCache_getFile(&acNew, fd->fileName, 0, 0);
+    file = bpc_attribCache_getFile(&acNew, fd->fileName->s, 0, 0);
     if ( file && newType < 0 ) newType = file->type;
     if ( newType < 0 ) newType = BPC_FTYPE_FILE;
 
@@ -513,7 +498,7 @@ static int bpc_fileClose(bpc_attribCache_info *ac, FdInfo *fd, int newType, int 
     }
     if ( !fd->dirty ) {
         if ( (fd->flags & O_WRONLY) || (fd->flags & O_RDWR) ) {
-            fprintf(stderr, "IOdone: same %s\n", fd->fileName);
+            fprintf(stderr, "IOdone: same %s\n", fd->fileName->s);
         }
         bpc_fileDescFree(fd);
         return 0;
@@ -557,23 +542,23 @@ static int bpc_fileClose(bpc_attribCache_info *ac, FdInfo *fd, int newType, int 
         /*
          * File is unchanged
          */
-        fprintf(stderr, "IOdone: same %s\n", fd->fileName);
+        fprintf(stderr, "IOdone: same %s\n", fd->fileName->s);
         bpc_fileDescFree(fd);
         return 0;
     }
 
     if ( file && !file->isTemp ) {
-        if ( acOldUsed && file->inode < Stats.Inode0 && !bpc_attribCache_getFile(&acOld, fd->fileName, 0, 0) ) {
+        if ( acOldUsed && file->inode < Stats.Inode0 && !bpc_attribCache_getFile(&acOld, fd->fileName->s, 0, 0) ) {
             if ( file->nlinks > 0 ) {
                 /*
                  * Only write the inode if it doesn't exist in old;
                  * in that case increase the pool reference count
                  */
-                if ( bpc_attribCache_setFile(&acOld, fd->fileName, file, 1) > 0 ) {
+                if ( bpc_attribCache_setFile(&acOld, fd->fileName->s, file, 1) > 0 ) {
                     bpc_poolRefDeltaUpdate(&DeltaOld, file->compress, &file->digest, 1);
                 }
             } else {
-                bpc_attribCache_setFile(&acOld, fd->fileName, file, 0);
+                bpc_attribCache_setFile(&acOld, fd->fileName->s, file, 0);
             }
         } else {
             /*
@@ -582,13 +567,13 @@ static int bpc_fileClose(bpc_attribCache_info *ac, FdInfo *fd, int newType, int 
              */
             bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, -1);
         }
-    } else if ( acOldUsed && (!file || !file->isTemp) && !bpc_attribCache_getFile(&acOld, fd->fileName, 0, 0) ) {
-        bpc_attrib_file *oldFile = bpc_attribCache_getFile(&acOld, fd->fileName, 1, 0);
+    } else if ( acOldUsed && (!file || !file->isTemp) && !bpc_attribCache_getFile(&acOld, fd->fileName->s, 0, 0) ) {
+        bpc_attrib_file *oldFile = bpc_attribCache_getFile(&acOld, fd->fileName->s, 1, 0);
         oldFile->type = BPC_FTYPE_DELETED;
-        bpc_attribCache_setFile(&acOld, fd->fileName, oldFile, 0);
+        bpc_attribCache_setFile(&acOld, fd->fileName->s, oldFile, 0);
     }
     if ( !file ) {
-        file = bpc_attribCache_getFile(&acNew, fd->fileName, 1, 0);
+        file = bpc_attribCache_getFile(&acNew, fd->fileName->s, 1, 0);
         file->inode      = Stats.InodeCurr;
         Stats.InodeCurr += 2;
         file->nlinks     = 0;
@@ -604,8 +589,8 @@ static int bpc_fileClose(bpc_attribCache_info *ac, FdInfo *fd, int newType, int 
         file->size = 0;
     }
     if ( !file->isTemp ) bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, 1);
-    bpc_attribCache_setFile(&acNew, fd->fileName, file, 0);
-    fprintf(stderr, "IOdone: %s %s\n", match ? "pool" : "new", fileNameLog ? fileNameLog : fd->fileName);
+    bpc_attribCache_setFile(&acNew, fd->fileName->s, file, 0);
+    fprintf(stderr, "IOdone: %s %s\n", match ? "pool" : "new", fileNameLog ? fileNameLog : fd->fileName->s);
     bpc_fileDescFree(fd);
     return 0;
 }
@@ -616,12 +601,13 @@ static int bpc_fileClose(bpc_attribCache_info *ac, FdInfo *fd, int newType, int 
  */
 static off_t bpc_fileReadAll(bpc_attribCache_info *ac, char *fileName, char *buffer, size_t bufferSize)
 {
-    char fullPath[BPC_MAXPATHLEN];
+    bpc_strBuf *fullPath;
     bpc_attrib_file *file;
     bpc_fileZIO_fd fd;
     off_t nRead;
 
     if ( !(file = bpc_attribCache_getFile(ac, fileName, 0, 0)) ) return -1;
+    fullPath = bpc_strBuf_new();
     if ( file->digest.len > 0 ) {
         /*
          * V4+ pool file
@@ -633,13 +619,15 @@ static off_t bpc_fileReadAll(bpc_attribCache_info *ac, char *fileName, char *buf
          */
         bpc_attribCache_getFullMangledPath(&acNew, fullPath, (char*)fileName, file->backupNum);
     }
-    if ( bpc_fileZIO_open(&fd, fullPath, 0, file->compress) ) {
-        bpc_logErrf("bpc_fileReadAll: can't open %s (from %s)\n", fullPath, fileName);
+    if ( bpc_fileZIO_open(&fd, fullPath->s, 0, file->compress) ) {
+        bpc_logErrf("bpc_fileReadAll: can't open %s (from %s)\n", fullPath->s, fileName);
         Stats.ErrorCnt++;
+        bpc_strBuf_free(fullPath);
         return -1;
     }
     nRead = bpc_fileZIO_read(&fd, (uchar*)buffer, bufferSize);
     bpc_fileZIO_close(&fd);
+    bpc_strBuf_free(fullPath);
     return nRead;
 }
 
@@ -710,16 +698,17 @@ int bpc_mkstemp(char *template, char *origFileName)
              * Make sure the pool file exists; otherwise zero out the digest
              */
             if ( file->digest.len > 0 ) {
-                char poolPath[BPC_MAXPATHLEN];
+                bpc_strBuf *poolPath = bpc_strBuf_new();
                 STRUCT_STAT st;
 
                 bpc_digest_md52path(poolPath, file->compress, &file->digest);
-                if ( stat(poolPath, &st) ) {
+                if ( stat(poolPath->s, &st) ) {
                     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_mkstemp: %s doesn't exist; ignoring digest for %s\n",
-                                                                poolPath, template);
+                                                                poolPath->s, template);
                     file->digest.len = 0;
                     file->size = 0;
                 }
+                bpc_strBuf_free(poolPath);
             }
             file->nlinks = 0;
         } else {
@@ -760,7 +749,7 @@ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct
                                char *file_sum, off_t fileSize)
 {
     bpc_attrib_file *fileOrig, *file;
-    char poolPath[BPC_MAXPATHLEN];
+    bpc_strBuf *poolPath;
 
     if ( !(fileOrig = bpc_attribCache_getFile(&acNew, fileName, 0, 0)) ) {
         /*
@@ -788,25 +777,29 @@ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct
     /*
      * make sure the pool file exists
      */
+    poolPath = bpc_strBuf_new();
     bpc_digest_md52path(poolPath, CompressLevel, &fileOrig->digest);
     if ( fileSize != 0 ) {
         STRUCT_STAT st;
-        if ( stat(poolPath, &st) ) {
+        if ( stat(poolPath->s, &st) ) {
             bpc_logErrf("bpc_sysCall_checkFileMatch(%s): got good match, but pool file %s doesn't exist - rewriting\n",
-                                        fileName, poolPath);
+                                        fileName, poolPath->s);
+            bpc_strBuf_free(poolPath);
             return -1;
         }
         if ( st.st_mode & S_IXOTH ) {
             /*
              * pool file is marked for deletion - safely unmark it since we are going to use it
              */
-            if ( bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
+            if ( bpc_poolWrite_unmarkPendingDelete(poolPath->s) ) {
                 bpc_logErrf("bpc_sysCall_checkFileMatch(%s): couldn't unmark pool file %s - rewriting\n",
-                                            fileName, poolPath);
+                                            fileName, poolPath->s);
+                bpc_strBuf_free(poolPath);
                 return -1;
             }
         }
     }
+    bpc_strBuf_free(poolPath);
 
     /*
      * Now mimic bpc_mkstemp() above
@@ -837,11 +830,13 @@ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct
 int bpc_sysCall_poolFileCheck(char *fileName, struct file_struct *rsyncFile)
 {
     bpc_digest digest;
-    char poolPath[BPC_MAXPATHLEN];
+    bpc_strBuf *poolPath;
     unsigned int ext;
     int foundPoolFile = 0;
 
     if ( protocol_version < 30 || !always_checksum ) return -1;
+
+    poolPath = bpc_strBuf_new();
 
     digest.len = MD5_DIGEST_LEN;
     memcpy(digest.digest, F_SUM(rsyncFile), MD5_DIGEST_LEN);
@@ -854,14 +849,14 @@ int bpc_sysCall_poolFileCheck(char *fileName, struct file_struct *rsyncFile)
             STRUCT_STAT st;
             bpc_digest_append_ext(&digest, ext);
             bpc_digest_md52path(poolPath, CompressLevel, &digest);
-            if ( stat(poolPath, &st) ) break;
+            if ( stat(poolPath->s, &st) ) break;
             if ( st.st_size == 0 ) continue;
             if ( st.st_mode & S_IXOTH ) {
                 /*
                  * pool file is marked for deletion - safely unmark it since we going to use it
                  */
-                if ( bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
-                    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_sysCall_poolFileCheck(%s): couldn't unmark potential match %s\n", fileName, poolPath);
+                if ( bpc_poolWrite_unmarkPendingDelete(poolPath->s) ) {
+                    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_sysCall_poolFileCheck(%s): couldn't unmark potential match %s\n", fileName, poolPath->s);
                     continue;
                 }
             }
@@ -872,12 +867,12 @@ int bpc_sysCall_poolFileCheck(char *fileName, struct file_struct *rsyncFile)
          * For an empty file there is no corresponding pool file, so just say it matches
          */
         foundPoolFile = 1;
-        poolPath[0] = '\0';
+        bpc_strBuf_strcpy(poolPath, 0, "");
     }
     if ( foundPoolFile ) {
         bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, fileName, 1, 0);
 
-        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_sysCall_poolFileCheck(%s): potential match %s (len = %lu)\n", fileName, poolPath, (unsigned long)F_LENGTH(rsyncFile));
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_sysCall_poolFileCheck(%s): potential match %s (len = %lu)\n", fileName, poolPath->s, (unsigned long)F_LENGTH(rsyncFile));
         file->type        = BPC_FTYPE_FILE;
         file->size        = F_LENGTH(rsyncFile);
         file->mode        = 0600;
@@ -886,9 +881,11 @@ int bpc_sysCall_poolFileCheck(char *fileName, struct file_struct *rsyncFile)
         Stats.InodeCurr  += 2;
         file->digest      = digest;
         file->isTemp      = 1;
+        bpc_strBuf_free(poolPath);
         return 0;
     } else {
-        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_sysCall_poolFileCheck(%s): no pool file at %s\n", fileName, poolPath);
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_sysCall_poolFileCheck(%s): no pool file at %s\n", fileName, poolPath->s);
+        bpc_strBuf_free(poolPath);
         return -1;
     }
 }
@@ -933,8 +930,8 @@ int bpc_fchmod(int filedes, mode_t mode)
         return -1;
     }
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_fchmod(%d (%s), 0%o)\n",
-                                    filedes, Fd[filedes].fileName, mode);
-    return bpc_lchmod(Fd[filedes].fileName, mode);
+                                    filedes, Fd[filedes].fileName->s, mode);
+    return bpc_lchmod(Fd[filedes].fileName->s, mode);
 }
 
 int bpc_unlink(const char *fileName)
@@ -1113,8 +1110,8 @@ int bpc_fstat(int filedes, struct stat *buf)
         errno = EBADF;
         return -1;
     }
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_fstat(%d (%s))\n", filedes, Fd[filedes].fileName);
-    ret = bpc_lstat(Fd[filedes].fileName, buf);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_fstat(%d (%s))\n", filedes, Fd[filedes].fileName->s);
+    ret = bpc_lstat(Fd[filedes].fileName->s, buf);
 
     /*
      * TODO: needed??  Based on the current write file update the size...
@@ -1148,7 +1145,7 @@ int bpc_stat(const char *fileName, struct stat *buf)
 int bpc_file_checksum(char *fileName, char *sum, int checksum_len)
 {
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0); 
-    char poolPath[BPC_MAXPATHLEN];
+    bpc_strBuf *poolPath;
     STRUCT_STAT st;
 
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_file_checksum(%s)\n", fileName);
@@ -1156,18 +1153,24 @@ int bpc_file_checksum(char *fileName, char *sum, int checksum_len)
     /*
      * check the pool file actually exists before returning the digest.
      */
+    poolPath = bpc_strBuf_new();
     bpc_digest_md52path(poolPath, file->compress, &file->digest);
-    if ( stat(poolPath, &st) ) return -1;
+    if ( stat(poolPath->s, &st) ) {
+        bpc_strBuf_free(poolPath);
+        return -1;
+    }
     if ( st.st_mode & S_IXOTH ) {
         /*
          * pool file is marked for deletion - safely unmark it since we are using it
          */
-        if ( bpc_poolWrite_unmarkPendingDelete(poolPath) ) {
+        if ( bpc_poolWrite_unmarkPendingDelete(poolPath->s) ) {
             bpc_logErrf("bpc_file_checksum(%s): couldn't unmark pool file %s - returning no match\n",
-                                        fileName, poolPath);
+                                        fileName, poolPath->s);
+            bpc_strBuf_free(poolPath);
             return -1;
         }
     }
+    bpc_strBuf_free(poolPath);
     memcpy(sum, file->digest.digest, checksum_len);
     return 0;
 }
@@ -1223,7 +1226,7 @@ int bpc_symlink(const char *fileName, const char *symName)
 int bpc_link(const char *targetName, const char *linkName)
 {
     bpc_attrib_file *file;
-    char poolPath[BPC_MAXPATHLEN];
+    bpc_strBuf *poolPath;
     STRUCT_STAT st;
 
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_link(%s, %s)\n", targetName, linkName);
@@ -1276,8 +1279,10 @@ int bpc_link(const char *targetName, const char *linkName)
 
     Stats.ExistFileCnt++;
     Stats.ExistFileSize += file->size;
+    poolPath = bpc_strBuf_new();
     bpc_digest_md52path(poolPath, file->compress, &file->digest);
-    if ( !stat(poolPath, &st) ) Stats.ExistFileCompSize += st.st_size;
+    if ( !stat(poolPath->s, &st) ) Stats.ExistFileCompSize += st.st_size;
+    bpc_strBuf_free(poolPath);
 
     if ( acOldUsed && !bpc_attribCache_getFile(&acOld, (char*)linkName, 0, 0) ) {
         file = bpc_attribCache_getFile(&acOld, (char*)linkName, 1, 0);
@@ -1512,16 +1517,20 @@ int bpc_rename(const char *oldName, const char *newName)
         }
     }
     if ( file->type == BPC_FTYPE_DIR ) {
-        char path[BPC_MAXPATHLEN], pathOld[BPC_MAXPATHLEN];
+        bpc_strBuf *path = bpc_strBuf_new(), *pathOld = bpc_strBuf_new();
 
         bpc_attribCache_getFullMangledPath(&acNew, path, (char*)newName, file->backupNum);
         bpc_attribCache_getFullMangledPath(&acNew, pathOld, (char*)oldName, file->backupNum);
 
-        if ( rename(pathOld, path) ) {
-            bpc_logErrf("bpc_rename: directory rename %s -> %s failed\n", pathOld, path);
+        if ( rename(pathOld->s, path->s) ) {
+            bpc_logErrf("bpc_rename: directory rename %s -> %s failed\n", pathOld->s, path->s);
             errno = EACCES;
+            bpc_strBuf_free(path);
+            bpc_strBuf_free(pathOld);
             return -1;
         }
+        bpc_strBuf_free(path);
+        bpc_strBuf_free(pathOld);
     }
     if ( acOldUsed ) {
         if ( !oldIsTemp && !bpc_attribCache_getFile(&acOld, (char*)oldName, 0, 0) ) {
@@ -1583,19 +1592,20 @@ int bpc_mknod(const char *fileName, mode_t mode, dev_t dev)
     if ( (mode & S_IFMT) == S_IFSOCK ) type = BPC_FTYPE_SOCKET;
 
     if ( type == BPC_FTYPE_BLOCKDEV || type == BPC_FTYPE_CHARDEV ) {
-        char data[BPC_MAXPATHLEN];
+        bpc_strBuf *data = bpc_strBuf_new();
 
         if ( !(fd = bpc_fileOpen(&acNew, (char*)fileName, O_WRONLY | O_CREAT | O_TRUNC)) ) {
             bpc_logErrf("bpc_mknod: open/create of %s failed\n", fileName);
             Stats.ErrorCnt++;
             return -1;
         }
-        snprintf(data, sizeof(data), "%lu,%lu", (unsigned long)major(dev), (unsigned long)minor(dev));
-        if ( bpc_fileWrite(&acNew, fd, data, strlen(data)) ) {
+        bpc_strBuf_snprintf(data, 0, "%lu,%lu", (unsigned long)major(dev), (unsigned long)minor(dev));
+        if ( bpc_fileWrite(&acNew, fd, data->s, strlen(data->s)) ) {
             bpc_logErrf("bpc_mknod: write failed\n");
             ret = -1;
             Stats.ErrorCnt++;
         }
+        bpc_strBuf_free(data);
         if ( bpc_fileClose(&acNew, fd, type, mode & ~S_IFMT, (char*)fileName) ) {
             bpc_logErrf("bpc_mknod: close failed\n");
             ret = -1;
@@ -1654,7 +1664,7 @@ int bpc_close(int fdNum)
         return -1;
     }
     
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_close(%d (%s))\n", fdNum, Fd[fdNum].fileName);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_close(%d (%s))\n", fdNum, Fd[fdNum].fileName->s);
 
     return bpc_fileClose(&acNew, &Fd[fdNum], -1, -1, NULL);
 }
@@ -1669,7 +1679,7 @@ off_t bpc_lseek(int fdNum, off_t offset, int whence)
     }
     fd = &Fd[fdNum];
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lseek(%d (%s), %lu, %d)\n", fdNum, fd->fileName, offset, whence);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lseek(%d (%s), %lu, %d)\n", fdNum, fd->fileName->s, offset, whence);
 
     if ( fd->tmpFd < 0 ) {
         off_t newPosn = -1;
@@ -1704,7 +1714,7 @@ off_t bpc_ftruncate(int fdNum, off_t length)
     }
     fd = &Fd[fdNum];
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_ftruncate(%d (%s), %lu)\n", fdNum, fd->fileName, length);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_ftruncate(%d (%s), %lu)\n", fdNum, fd->fileName->s, length);
 
     if ( fd->tmpFd < 0 ) {
         if ( length < 0 ) {
@@ -1741,7 +1751,7 @@ ssize_t bpc_read(int fdNum, void *buf, size_t readSize)
     fd = &Fd[fdNum];
 
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_read(%d (%s), buf, %lu) tmpFd = %d\n",
-                                    fdNum, fd->fileName, readSize, fd->tmpFd);
+                                    fdNum, fd->fileName->s, readSize, fd->tmpFd);
 
     if ( fd->tmpFd < 0 ) {
         if ( fd->posn >= fd->fileSize || (size_t)fd->posn >= fd->bufferSize ) {
@@ -1770,7 +1780,7 @@ ssize_t bpc_write(int fdNum, const void *buf, size_t writeSize)
     fd = &Fd[fdNum];
 
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_write(%d (%s), buf, %lu)\n",
-                                    fdNum, fd->fileName, writeSize);
+                                    fdNum, fd->fileName->s, writeSize);
 
     if ( bpc_fileWrite(&acNew, fd, (char*)buf, writeSize) ) return -1;
     return writeSize;
@@ -1827,7 +1837,7 @@ int bpc_chdir(const char *dirName)
 
 int bpc_mkdir(const char *dirName, mode_t mode)
 {
-    char path[BPC_MAXPATHLEN];
+    bpc_strBuf *path = bpc_strBuf_new();
     bpc_attrib_file *file;
     int ret;
 
@@ -1836,6 +1846,7 @@ int bpc_mkdir(const char *dirName, mode_t mode)
     bpc_attribCache_getFullMangledPath(&acNew, path, (char*)dirName, -1);
     if ( bpc_attribCache_getFile(&acNew, (char*)dirName, 0, 0) ) {
         errno = EEXIST;
+        bpc_strBuf_free(path);
         return -1;
     }
 
@@ -1844,7 +1855,10 @@ int bpc_mkdir(const char *dirName, mode_t mode)
         file->type = BPC_FTYPE_DELETED;
         bpc_attribCache_setFile(&acOld, (char*)dirName, file, 0);
     }
-    if ( (ret = bpc_path_create(path)) ) return ret;
+    if ( (ret = bpc_path_create(path->s)) ) {
+        bpc_strBuf_free(path);
+        return ret;
+    }
     file = bpc_attribCache_getFile(&acNew, (char*)dirName, 1, 0);
     file->type  = BPC_FTYPE_DIR;
     file->mode  = mode;
@@ -1856,12 +1870,13 @@ int bpc_mkdir(const char *dirName, mode_t mode)
     } else {
         fprintf(stderr, "IOdone: new %s\n", dirName);
     }
+    bpc_strBuf_free(path);
     return 0;
 }
 
 int bpc_rmdir(const char *dirName)
 {
-    char path[BPC_MAXPATHLEN];
+    bpc_strBuf *path = bpc_strBuf_new();
     bpc_attrib_file *file;
     STRUCT_STAT st;
     int statOk, cnt;
@@ -1871,14 +1886,16 @@ int bpc_rmdir(const char *dirName)
     file = bpc_attribCache_getFile(&acNew, (char*)dirName, 0, 0);
     bpc_attribCache_getFullMangledPath(&acNew, path, (char*)dirName, file->backupNum);
 
-    statOk = !stat(path, &st);
+    statOk = !stat(path->s, &st);
 
     if ( (!file || file->type != BPC_FTYPE_DIR) && (!statOk || !S_ISDIR(st.st_mode)) ) {
         errno = ENOENT;
+        bpc_strBuf_free(path);
         return -1;
     }
     if ( (cnt = bpc_attribCache_getDirEntryCnt(&acNew, (char*)dirName)) > 0 ) {
         errno = ENOTEMPTY;
+        bpc_strBuf_free(path);
         return -1;
     }
 
@@ -1891,11 +1908,12 @@ int bpc_rmdir(const char *dirName)
      * TODO: is dirName in the right charset?
      */
     bpc_attribCache_flush(&acNew, 0, (char*)dirName);
-    if ( statOk ) bpc_path_remove(&DeltaNew, path, acNew.compress);
+    if ( statOk ) bpc_path_remove(&DeltaNew, path->s, acNew.compress);
     if ( file && file->inode < Stats.Inode0 && acOldUsed && !bpc_attribCache_getFile(&acOld, (char*)dirName, 0, 0) ) {
         bpc_attribCache_setFile(&acOld, (char*)dirName, file, 0);
     }
     bpc_attribCache_deleteFile(&acNew, (char*)dirName);
+    bpc_strBuf_free(path);
     return 0;
 }
 
@@ -1994,9 +2012,9 @@ ssize_t bpc_fgetxattr(int filedes, const char *name, void *value, size_t size)
         return -1;
     }
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_fgetxattr(%d (%s), %s)\n", filedes, Fd[filedes].fileName, name);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_fgetxattr(%d (%s), %s)\n", filedes, Fd[filedes].fileName->s, name);
 
-    return bpc_lgetxattr(Fd[filedes].fileName, name, value, size);
+    return bpc_lgetxattr(Fd[filedes].fileName->s, name, value, size);
 }
 
 int bpc_lsetxattr(const char *path, const char *name, const void *value, size_t size, UNUSED(int flags))

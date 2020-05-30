@@ -29,17 +29,21 @@ void bpc_attribCache_init(bpc_attribCache_info *ac, char *hostName, int backupNu
     ac->cacheLruCnt   = 0;
     ac->bkupMergeList = NULL;
     ac->bkupMergeCnt  = 0;
-    ac->currentDir[0] = '\0';
     ac->deltaInfo     = NULL;
-    strncpy(ac->hostName, hostName, BPC_MAXPATHLEN);
-    ac->hostName[BPC_MAXPATHLEN - 1] = '\0';
-    strncpy(ac->shareNameUM, shareNameUM, BPC_MAXPATHLEN);
-    ac->shareNameUM[BPC_MAXPATHLEN - 1] = '\0';
-    bpc_fileNameEltMangle(ac->shareName, BPC_MAXPATHLEN, ac->shareNameUM);
-    ac->shareNameLen = strlen(ac->shareName);
-    snprintf(ac->hostDir, BPC_MAXPATHLEN, "%s/pc/%s", BPC_TopDir, hostName);
-    snprintf(ac->backupTopDir, BPC_MAXPATHLEN, "%s/pc/%s/%d", BPC_TopDir, hostName, ac->backupNum);
-    bpc_path_create(ac->backupTopDir);
+
+    ac->shareName     = bpc_strBuf_new();
+    ac->shareNameUM   = bpc_strBuf_new();
+    ac->hostName      = bpc_strBuf_new();
+    ac->backupTopDir  = bpc_strBuf_new();
+    ac->currentDir    = bpc_strBuf_new();
+
+    bpc_strBuf_strcpy(ac->hostName,       0, hostName);
+    bpc_strBuf_strcpy(ac->shareNameUM,    0, shareNameUM);
+    bpc_fileNameEltMangle(ac->shareName,  ac->shareNameUM->s);
+    bpc_strBuf_snprintf(ac->backupTopDir, 0, "%s/pc/%s/%d", BPC_TopDir.s, ac->hostName->s, ac->backupNum);
+    bpc_strBuf_strcpy(ac->currentDir,     0, "");
+
+    bpc_path_create(ac->backupTopDir->s);
 
     bpc_hashtable_create(&ac->attrHT,  BPC_ATTRIBCACHE_DIR_HT_SIZE, sizeof(bpc_attribCache_dir));
     bpc_hashtable_create(&ac->inodeHT, BPC_ATTRIBCACHE_DIR_HT_SIZE, sizeof(bpc_attribCache_dir));
@@ -71,6 +75,11 @@ void bpc_attribCache_destroy(bpc_attribCache_info *ac)
     bpc_hashtable_iterate(&ac->inodeHT, (void*)bpc_attribCache_destroyEntry, NULL);
     bpc_hashtable_destroy(&ac->inodeHT);
     if ( ac->bkupMergeList ) free(ac->bkupMergeList);
+    bpc_strBuf_free(ac->shareName);
+    bpc_strBuf_free(ac->shareNameUM);
+    bpc_strBuf_free(ac->hostName);
+    bpc_strBuf_free(ac->backupTopDir);
+    bpc_strBuf_free(ac->currentDir);
     ac->bkupMergeList = NULL;
     ac->bkupMergeCnt  = 0;
 }
@@ -84,22 +93,21 @@ int bpc_attribCache_readOnly(bpc_attribCache_info *ac, int readOnly)
 void bpc_attribCache_setCurrentDirectory(bpc_attribCache_info *ac, char *dir)
 {
     char *p;
-    snprintf(ac->currentDir, BPC_MAXPATHLEN, "%s", dir);
-    p = ac->currentDir + strlen(ac->currentDir) - 1;
-    while ( p >= ac->currentDir && p[0] == '/' ) *p-- = '\0';
+    bpc_strBuf_strcpy(ac->currentDir, 0, dir);
+    p = ac->currentDir->s + strlen(ac->currentDir->s) - 1;
+    while ( p >= ac->currentDir->s && p[0] == '/' ) *p-- = '\0';
 }
 
 /*
  * Given a backup path, split it into the directory, file name, and path to the directory (starting
- * with the share name, ie: relative to ac->backupTopDir).
+ * with the share name, ie: relative to ac->backupTopDir->s).
  *
  * splitPath will strip initial "./" and trailing "/." or "/" before splitting the path, but isn't
  * capable of handling paths with "/." in the middle, or ".." anywhere.
  */
-static void splitPath(bpc_attribCache_info *ac, char *dir, char *fileName, char *attribPath, char *path)
+static void splitPath(bpc_attribCache_info *ac, bpc_strBuf *dir, bpc_strBuf *fileName, bpc_strBuf *attribPath, char *path)
 {
-    char *dirOrig = dir;
-    char fullPath[2*BPC_MAXPATHLEN];
+    bpc_strBuf *fullPath = bpc_strBuf_new();
     size_t pathLen;
 
     /*
@@ -111,11 +119,11 @@ static void splitPath(bpc_attribCache_info *ac, char *dir, char *fileName, char 
     }
 
     /*
-     * if this is a relative path, prepend ac->currentDir (provided ac->currentDir is set)
+     * if this is a relative path, prepend ac->currentDir->s (provided ac->currentDir->s is set)
      */
-    if ( path[0] != '/' && ac->currentDir[0] ) {
-        snprintf(fullPath, sizeof(fullPath), "%s/%s", ac->currentDir, path);
-        path = fullPath;
+    if ( path[0] != '/' && ac->currentDir->s[0] ) {
+        bpc_strBuf_snprintf(fullPath, 0, "%s/%s", ac->currentDir->s, path);
+        path = fullPath->s;
     }
 
     /*
@@ -124,9 +132,9 @@ static void splitPath(bpc_attribCache_info *ac, char *dir, char *fileName, char 
     pathLen = strlen(path);
     while ( (pathLen > 1 && path[pathLen - 2] == '/' && path[pathLen - 1] == '.')
          || (pathLen > 0 && path[pathLen - 1] == '/') ) {
-        if ( path != fullPath ) {
-            strncpy(fullPath, path, BPC_MAXPATHLEN);
-            path = fullPath;
+        if ( path != fullPath->s ) {
+            bpc_strBuf_strcpy(fullPath, 0, path);
+            path = fullPath->s;
         }
         if ( path[pathLen - 1] == '/' ) {
             pathLen -= 1;
@@ -137,37 +145,37 @@ static void splitPath(bpc_attribCache_info *ac, char *dir, char *fileName, char 
         if ( BPC_LogLevel >= 9 ) bpc_logMsgf("splitPath: trimming path = '%s'\n", path);
     }
     if ( !path[0] || (!path[1] && (path[0] == '.' || path[0] == '/')) ) {
-        strcpy(fileName, ac->shareNameUM);
-        strcpy(dir,  "/");
-        strcpy(attribPath, "/attrib");
+        bpc_strBuf_strcpy(fileName, 0, ac->shareNameUM->s);
+        bpc_strBuf_strcpy(dir, 0, "/");
+        bpc_strBuf_strcpy(attribPath, 0, "/attrib");
     } else {
         char *p;
-        int dirLen = BPC_MAXPATHLEN - ac->shareNameLen;
+        int i;
 
-        strcpy(dir, ac->shareName);
-        dir += strlen(dir);
+        bpc_strBuf_strcpy(dir, 0, ac->shareName->s);
+        i = strlen(dir->s);
         if ( (p = strrchr(path, '/')) ) {
             if ( *path != '/' ) {
-                *dir++ = '/'; dirLen--;
-                *dir = '\0';
+                bpc_strBuf_strcat(dir, i++, "/");
             }
-            strcpy(fileName, p+1);
+            bpc_strBuf_strcpy(fileName, 0, p+1);
             *p = '\0';
-            bpc_fileNameMangle(dir, dirLen, path);
+            bpc_fileNameMangle(dir, path, i);
             *p = '/';
         } else {
-            strcpy(fileName, path);
+            bpc_strBuf_strcpy(fileName, 0, path);
         }
-        snprintf(attribPath, BPC_MAXPATHLEN, "%s/attrib", dirOrig);
+        bpc_strBuf_snprintf(attribPath, 0, "%s/attrib", dir->s);
     }
     if ( BPC_LogLevel >= 9 ) bpc_logMsgf("splitPath: returning dir = '%s', fileName = '%s', attrib = '%s' from path = '%s'\n",
-                            dirOrig, fileName, attribPath, path);
+                            dir->s, fileName->s, attribPath->s, path);
+    bpc_strBuf_free(fullPath);
 }
 
-static void inodePath(UNUSED(bpc_attribCache_info *ac), char *indexStr, char *attribPath, char *attribFile, ino_t inode)
+static void inodePath(UNUSED(bpc_attribCache_info *ac), char *indexStr, bpc_strBuf *attribPath, bpc_strBuf *attribFile, ino_t inode)
 {
-    snprintf(attribPath, BPC_MAXPATHLEN, "inode/%02x", (unsigned int)(inode >> 17) & 0x7f);
-    snprintf(attribFile, BPC_MAXPATHLEN, "attrib%02x", (unsigned int)(inode >> 10) & 0x7f);
+    bpc_strBuf_snprintf(attribPath, 0, "inode/%02x", (unsigned int)(inode >> 17) & 0x7f);
+    bpc_strBuf_snprintf(attribFile, 0, "attrib%02x", (unsigned int)(inode >> 10) & 0x7f);
     do {
         bpc_byte2hex(indexStr, inode & 0xff);
         indexStr += 2;
@@ -185,32 +193,35 @@ static void bpc_attribCache_removeDeletedEntries(bpc_attrib_file *file, void *ar
     bpc_hashtable_nodeDelete(&attr->dir.filesHT, file);
 }
 
-static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, char *fileName, char *path)
+static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, bpc_strBuf *fileName, char *path)
 {
-    char dir[BPC_MAXPATHLEN], attribPath[BPC_MAXPATHLEN];
+    bpc_strBuf *dirStr = bpc_strBuf_new(), *attribPath = bpc_strBuf_new();
     bpc_attribCache_dir *attr;
     int attribPathLen, status;
 
-    splitPath(ac, dir, fileName, attribPath, path);
-    attribPathLen = strlen(attribPath);
+    splitPath(ac, dirStr, fileName, attribPath, path);
+    attribPathLen = strlen(attribPath->s);
 
-    if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadPath: path = %s -> dir = %s, fileName = %s, attribPath = %s\n", path, dir, fileName, attribPath);
+    if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadPath: path = %s -> dir = %s, fileName = %s, attribPath = %s\n", path, dirStr->s, fileName, attribPath->s);
+    bpc_strBuf_free(dirStr);
 
-    attr = bpc_hashtable_find(&ac->attrHT, (uchar*)attribPath, attribPathLen, 1);
+    attr = bpc_hashtable_find(&ac->attrHT, (uchar*)attribPath->s, attribPathLen, 1);
 
-    if ( !attr || attr->key.key != attribPath ) {
+    if ( !attr || attr->key.key != attribPath->s ) {
         /*
          * cache hit - return the existing attributes
          */
         if ( attr ) attr->lruCnt = ac->cacheLruCnt++;
+        bpc_strBuf_free(attribPath);
         return attr;
     }
 
     if ( !(attr->key.key = malloc(attribPathLen + 1)) ) {
         bpc_logErrf("bpc_attribCache_loadPath: can't allocate %d bytes\n", attribPathLen + 1);
+        bpc_strBuf_free(attribPath);
         return NULL;
     }
-    strcpy(attr->key.key, attribPath);
+    strcpy(attr->key.key, attribPath->s);
     bpc_attrib_dirInit(&attr->dir, ac->compress);
     attr->dirty  = 0;
     attr->dirOk  = 0;
@@ -218,7 +229,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
 
     if ( ac->bkupMergeCnt > 0 ) {
         int i;
-        char topDir[2*BPC_MAXPATHLEN], fullAttribPath[2*BPC_MAXPATHLEN];
+        bpc_strBuf *topDir = bpc_strBuf_new(), *fullAttribPath = bpc_strBuf_new();
 
         /*
          * Merge multiple attrib files to create the "view" for this backup.
@@ -232,19 +243,19 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
             int attribFileExists, attribDirExists = 1;
             STRUCT_STAT st;
 
-            snprintf(topDir, sizeof(topDir), "%s/pc/%s/%d", BPC_TopDir, ac->hostName, ac->bkupMergeList[i].num);
-            snprintf(fullAttribPath, sizeof(fullAttribPath), "%s/%s", topDir, attribPath);
+            bpc_strBuf_snprintf(topDir, 0, "%s/pc/%s/%d", BPC_TopDir.s, ac->hostName->s, ac->bkupMergeList[i].num);
+            bpc_strBuf_snprintf(fullAttribPath, 0, "%s/%s", topDir->s, attribPath->s);
 
-            attribFileExists = !stat(fullAttribPath, &st) && S_ISREG(st.st_mode);
+            attribFileExists = !stat(fullAttribPath->s, &st) && S_ISREG(st.st_mode);
 
             if ( !attribFileExists ) {
                 char *p;
-                if ( (p = strrchr(fullAttribPath, '/')) ) {
+                if ( (p = strrchr(fullAttribPath->s, '/')) ) {
                     *p = '\0';
-                    attribDirExists = !stat(fullAttribPath, &st) && S_ISDIR(st.st_mode);
+                    attribDirExists = !stat(fullAttribPath->s, &st) && S_ISDIR(st.st_mode);
                 }
             }
-            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadPath: path = %s, file exists = %d, dir exists = %d\n", fullAttribPath, attribFileExists, attribDirExists);
+            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadPath: path = %s, file exists = %d, dir exists = %d\n", fullAttribPath->s, attribFileExists, attribDirExists);
 
             if ( ac->bkupMergeList[i].version < 4 && i == ac->bkupMergeCnt - 1 && !attribFileExists && !attribDirExists ) {
                 /*
@@ -261,8 +272,8 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
                 continue;
             }
             bpc_attrib_dirInit(&dir, ac->bkupMergeList[i].compress);
-            if ( (status = bpc_attrib_dirRead(&dir, topDir, attribPath, ac->bkupMergeList[i].num)) ) {
-                bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s/%s) returned %d\n", topDir, attribPath, status);
+            if ( (status = bpc_attrib_dirRead(&dir, topDir->s, attribPath->s, ac->bkupMergeList[i].num)) ) {
+                bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s/%s) returned %d\n", topDir->s, attribPath->s, status);
             }
             entrySize = bpc_attrib_getEntries(&dir, NULL, 0);
             if ( (entries = malloc(entrySize)) && bpc_attrib_getEntries(&dir, entries, entrySize) == entrySize ) {
@@ -274,7 +285,12 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
                     } else {
                         bpc_attrib_file *fileDest;
 
-                        if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, fileName, 1)) ) return NULL;
+                        if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, fileName, 1)) ) {
+                            bpc_strBuf_free(attribPath);
+                            bpc_strBuf_free(topDir);
+                            bpc_strBuf_free(fullAttribPath);
+                            return NULL;
+                        }
                         if ( fileDest->key.key == fileName ) {
                             /*
                              * new entry - initialize
@@ -287,20 +303,25 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
                 }
             } else {
                 bpc_logErrf("bpc_attribCache_loadPath(%s/%s): can't malloc %lu bytes for entries\n",
-                                    topDir, attribPath, (unsigned long)entrySize);
+                                    topDir->s, attribPath->s, (unsigned long)entrySize);
                 if ( entries ) free(entries);
                 bpc_attrib_dirDestroy(&dir);
+                bpc_strBuf_free(attribPath);
+                bpc_strBuf_free(topDir);
+                bpc_strBuf_free(fullAttribPath);
                 return NULL;
             }
             free(entries);
             bpc_attrib_dirDestroy(&dir);
         }
+        bpc_strBuf_free(topDir);
+        bpc_strBuf_free(fullAttribPath);
     } else {
         /*
          * non-merge case - read the single attrib file
          */
-        if ( (status = bpc_attrib_dirRead(&attr->dir, ac->backupTopDir, attribPath, ac->backupNum)) ) {
-            bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s, %s) returned %d\n", ac->backupTopDir, attribPath, status);
+        if ( (status = bpc_attrib_dirRead(&attr->dir, ac->backupTopDir->s, attribPath->s, ac->backupNum)) ) {
+            bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s, %s) returned %d\n", ac->backupTopDir->s, attribPath->s, status);
         }
         /*
          * remove any extraneous BPC_FTYPE_DELETED file types
@@ -310,22 +331,27 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
     if ( bpc_hashtable_entryCount(&ac->attrHT) > BPC_ATTRIBCACHE_DIR_COUNT_MAX ) {
         bpc_attribCache_flush(ac, 0, NULL);
     }
+    bpc_strBuf_free(attribPath);
     return attr;
 }
 
 static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, char *indexStr, ino_t inode)
 {
-    char attribPath[BPC_MAXPATHLEN], attribDir[BPC_MAXPATHLEN], attribFile[BPC_MAXPATHLEN];
+    bpc_strBuf *attribPath = bpc_strBuf_new(), *attribDir = bpc_strBuf_new(), *attribFile = bpc_strBuf_new();
+    bpc_strBuf *inodeDir, *fullAttribPath;
     bpc_attribCache_dir *attr;
     int attribPathLen, status;
 
     inodePath(ac, indexStr, attribDir, attribFile, inode);
-    attribPathLen = snprintf(attribPath, sizeof(attribPath), "%s/%s", attribDir, attribFile);
+    attribPathLen = bpc_strBuf_snprintf(attribPath, 0, "%s/%s", attribDir->s, attribFile->s);
 
-    attr = bpc_hashtable_find(&ac->inodeHT, (uchar*)attribPath, attribPathLen, 1);
+    attr = bpc_hashtable_find(&ac->inodeHT, (uchar*)attribPath->s, attribPathLen, 1);
 
-    if ( !attr || attr->key.key != attribPath ) {
+    if ( !attr || attr->key.key != attribPath->s ) {
         if ( attr ) attr->lruCnt = ac->cacheLruCnt++;
+        bpc_strBuf_free(attribPath);
+        bpc_strBuf_free(attribDir);
+        bpc_strBuf_free(attribFile);
         return attr;
     }
 
@@ -334,16 +360,20 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
      */
     if ( !(attr->key.key = malloc(attribPathLen + 1)) ) {
         bpc_logErrf("bpc_attribCache_loadInode: can't allocate %d bytes\n", attribPathLen + 1);
+        bpc_strBuf_free(attribPath);
+        bpc_strBuf_free(attribDir);
+        bpc_strBuf_free(attribFile);
         return NULL;
     }
-    strcpy(attr->key.key, attribPath);
+    strcpy(attr->key.key, attribPath->s);
     bpc_attrib_dirInit(&attr->dir, ac->compress);
     attr->dirty  = 0;
     attr->dirOk  = 1;
     attr->lruCnt = ac->cacheLruCnt++;
+    inodeDir = bpc_strBuf_new();
+    fullAttribPath = bpc_strBuf_new();
     if ( ac->bkupMergeCnt > 0 ) {
         int i;
-        char inodeDir[2*BPC_MAXPATHLEN], fullAttribPath[2*BPC_MAXPATHLEN];
 
         /*
          * Merge multiple attrib files to create the "view" for this backup.
@@ -356,14 +386,14 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
             int attribFileExists, attribDirExists = 1;
             STRUCT_STAT st;
 
-            snprintf(inodeDir, sizeof(inodeDir), "%s/pc/%s/%d/%s", BPC_TopDir, ac->hostName, ac->bkupMergeList[i].num, attribDir);
-            snprintf(fullAttribPath, sizeof(fullAttribPath), "%s/%s", inodeDir, attribFile);
+            bpc_strBuf_snprintf(inodeDir, 0, "%s/pc/%s/%d/%s", BPC_TopDir.s, ac->hostName->s, ac->bkupMergeList[i].num, attribDir->s);
+            bpc_strBuf_snprintf(fullAttribPath, 0, "%s/%s", inodeDir->s, attribFile->s);
 
-            attribFileExists = !stat(fullAttribPath, &st) && S_ISREG(st.st_mode);
+            attribFileExists = !stat(fullAttribPath->s, &st) && S_ISREG(st.st_mode);
             if ( !attribFileExists ) {
-                attribDirExists = !stat(inodeDir, &st) && S_ISDIR(st.st_mode);
+                attribDirExists = !stat(inodeDir->s, &st) && S_ISDIR(st.st_mode);
             }
-            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadInode: path = %s, file exists = %d, dir exists = %d\n", fullAttribPath, attribFileExists, attribDirExists);
+            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadInode: path = %s, file exists = %d, dir exists = %d\n", fullAttribPath->s, attribFileExists, attribDirExists);
 
             if ( (ac->bkupMergeList[i].version < 4 && !attribFileExists) || !attribDirExists ) {
                 /*
@@ -372,8 +402,8 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
                 continue;
             }
             bpc_attrib_dirInit(&dir, ac->bkupMergeList[i].compress);
-            if ( (status = bpc_attrib_dirRead(&dir, inodeDir, attribFile, ac->bkupMergeList[i].num)) ) {
-                bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", inodeDir, attribFile, status);
+            if ( (status = bpc_attrib_dirRead(&dir, inodeDir->s, attribFile->s, ac->bkupMergeList[i].num)) ) {
+                bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", inodeDir->s, attribFile->s, status);
             }
             entrySize = bpc_attrib_getEntries(&dir, NULL, 0);
             if ( (entries = malloc(entrySize)) && bpc_attrib_getEntries(&dir, entries, entrySize) == entrySize ) {
@@ -385,7 +415,14 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
                     } else {
                         bpc_attrib_file *fileDest;
 
-                        if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, fileName, 1)) ) return NULL;
+                        if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, fileName, 1)) ) {
+                            bpc_strBuf_free(attribPath);
+                            bpc_strBuf_free(attribDir);
+                            bpc_strBuf_free(attribFile);
+                            bpc_strBuf_free(inodeDir);
+                            bpc_strBuf_free(fullAttribPath);
+                            return NULL;
+                        }
                         if ( fileDest->key.key == fileName ) {
                             /*
                              * new entry - initialize
@@ -397,9 +434,14 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
                 }
             } else {
                 bpc_logErrf("bpc_attribCache_loadInode(%s): can't malloc %lu bytes for entries\n",
-                                    fullAttribPath, (unsigned long)entrySize);
+                                    fullAttribPath->s, (unsigned long)entrySize);
                 if ( entries ) free(entries);
                 bpc_attrib_dirDestroy(&dir);
+                bpc_strBuf_free(attribPath);
+                bpc_strBuf_free(attribDir);
+                bpc_strBuf_free(attribFile);
+                bpc_strBuf_free(inodeDir);
+                bpc_strBuf_free(fullAttribPath);
                 return NULL;
             }
             free(entries);
@@ -409,36 +451,47 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
         /*
          * non-merge case - read the single attrib file
          */
-        char inodeDir[2*BPC_MAXPATHLEN];
-        snprintf(inodeDir, sizeof(inodeDir), "%s/%s", ac->backupTopDir, attribDir);
+        bpc_strBuf_snprintf(inodeDir, 0, "%s/%s", ac->backupTopDir->s, attribDir->s);
 
-        if ( (status = bpc_attrib_dirRead(&attr->dir, inodeDir, attribFile, ac->backupNum)) ) {
-            bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", inodeDir, attribFile, status);
+        if ( (status = bpc_attrib_dirRead(&attr->dir, inodeDir->s, attribFile->s, ac->backupNum)) ) {
+            bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", inodeDir->s, attribFile->s, status);
         }
     }
     if ( bpc_hashtable_entryCount(&ac->inodeHT) > BPC_ATTRIBCACHE_DIR_COUNT_MAX ) {
         bpc_attribCache_flush(ac, 0, NULL);
     }
+    bpc_strBuf_free(attribPath);
+    bpc_strBuf_free(attribDir);
+    bpc_strBuf_free(attribFile);
+    bpc_strBuf_free(inodeDir);
+    bpc_strBuf_free(fullAttribPath);
     return attr;
 }
 
 bpc_attrib_file *bpc_attribCache_getFile(bpc_attribCache_info *ac, char *path, int allocate_if_missing, int dontReadInode)
 {
-    char fileName[BPC_MAXPATHLEN];
+    bpc_strBuf *fileName = bpc_strBuf_new();
     bpc_attribCache_dir *attr;
     bpc_attrib_file *file;
 
-    if ( !(attr = bpc_attribCache_loadPath(ac, fileName, path)) ) return NULL;
+    if ( !(attr = bpc_attribCache_loadPath(ac, fileName, path)) ) {
+        bpc_strBuf_free(fileName);
+        return NULL;
+    }
     attr->lruCnt = ac->cacheLruCnt++;
-    if ( !(file = bpc_attrib_fileGet(&attr->dir, fileName, allocate_if_missing)) ) return NULL;
+    if ( !(file = bpc_attrib_fileGet(&attr->dir, fileName->s, allocate_if_missing)) ) {
+        bpc_strBuf_free(fileName);
+        return NULL;
+    }
 
-    if ( allocate_if_missing && file->key.key == fileName ) {
+    if ( allocate_if_missing && file->key.key == fileName->s ) {
         /*
          * new entry - initialize
          */
-        bpc_attrib_fileInit(file, fileName, 0);
+        bpc_attrib_fileInit(file, fileName->s, 0);
         file->compress = ac->compress;
     }
+    bpc_strBuf_free(fileName);
     if ( dontReadInode || file->nlinks == 0 ) return file;
 
     return bpc_attribCache_getInode(ac, file->inode, allocate_if_missing);
@@ -446,25 +499,33 @@ bpc_attrib_file *bpc_attribCache_getFile(bpc_attribCache_info *ac, char *path, i
 
 int bpc_attribCache_setFile(bpc_attribCache_info *ac, char *path, bpc_attrib_file *file, int dontOverwriteInode)
 {
-    char fileName[BPC_MAXPATHLEN], indexStr[256];
+    bpc_strBuf *fileName = bpc_strBuf_new();
+    char indexStr[256];
     bpc_attribCache_dir *attr, *attrInode;
     bpc_attrib_file *fileDest;
 
-    if ( !(attr = bpc_attribCache_loadPath(ac, fileName, path)) ) return -1;
+    if ( !(attr = bpc_attribCache_loadPath(ac, fileName, path)) ) {
+        bpc_strBuf_free(fileName);
+        return -1;
+    }
     attr->lruCnt = ac->cacheLruCnt++;
     file->compress = ac->compress;
 
-    if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, fileName, 1)) ) return -1;
+    if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, fileName->s, 1)) ) {
+        bpc_strBuf_free(fileName);
+        return -1;
+    }
 
-    if ( fileDest->key.key == fileName ) {
+    if ( fileDest->key.key == fileName->s ) {
         /*
          * new entry - initialize
          */
-        bpc_attrib_fileInit(fileDest, fileName, 0);
+        bpc_attrib_fileInit(fileDest, fileName->s, 0);
     }
 
     bpc_attrib_fileCopy(fileDest, file);
     attr->dirty = 1;
+    bpc_strBuf_free(fileName);
     if ( file->nlinks > 0 ) {
         bpc_attrib_file *inodeDest = bpc_attribCache_getInode(ac, file->inode, 0);
         if ( !dontOverwriteInode || !inodeDest ) {
@@ -493,13 +554,17 @@ int bpc_attribCache_setFile(bpc_attribCache_info *ac, char *path, bpc_attrib_fil
 
 int bpc_attribCache_deleteFile(bpc_attribCache_info *ac, char *path)
 {
-    char fileName[BPC_MAXPATHLEN];
+    bpc_strBuf *fileName = bpc_strBuf_new();
     bpc_attribCache_dir *attr;
 
-    if ( !(attr = bpc_attribCache_loadPath(ac, fileName, path)) ) return -1;
+    if ( !(attr = bpc_attribCache_loadPath(ac, fileName, path)) ) {
+        bpc_strBuf_free(fileName);
+        return -1;
+    }
     attr->lruCnt = ac->cacheLruCnt++;
-    bpc_attrib_fileDeleteName(&attr->dir, fileName);
+    bpc_attrib_fileDeleteName(&attr->dir, fileName->s);
     attr->dirty = 1;
+    bpc_strBuf_free(fileName);
     return 0;
 }
 
@@ -559,16 +624,15 @@ int bpc_attribCache_deleteInode(bpc_attribCache_info *ac, ino_t inode)
 int bpc_attribCache_getDirEntryCnt(bpc_attribCache_info *ac, char *path)
 {
     bpc_attribCache_dir *attr;
-    char fileName[BPC_MAXPATHLEN];
-    size_t pathLen = strlen(path);
+    bpc_strBuf *fileName = bpc_strBuf_new(), *pathAppend = bpc_strBuf_new();
 
     /*
      * Append a fake file name so we actually open the directory's contents, not the directory entry one level up
      */
-    if ( pathLen >= BPC_MAXPATHLEN - 3 ) return -1;
-    strcpy(path + pathLen, "/x");
-    attr = bpc_attribCache_loadPath(ac, fileName, path);
-    path[pathLen] = '\0';
+    bpc_strBuf_snprintf(pathAppend, 0, "%s/x", path);
+    attr = bpc_attribCache_loadPath(ac, fileName, pathAppend->s);
+    bpc_strBuf_free(fileName);
+    bpc_strBuf_free(pathAppend);
     if ( !attr ) return -1;
     return bpc_hashtable_entryCount(&attr->dir.filesHT);
 }
@@ -601,27 +665,26 @@ static void bpc_attribCache_getDirEntry(bpc_attrib_file *file, dirEntry_info *in
 ssize_t bpc_attribCache_getDirEntries(bpc_attribCache_info *ac, char *path, char *entries, ssize_t entrySize)
 {
     bpc_attribCache_dir *attr;
-    char fileName[BPC_MAXPATHLEN], fullPath[2*BPC_MAXPATHLEN];
+    bpc_strBuf *fileName = bpc_strBuf_new(), *fullPath = bpc_strBuf_new();
     dirEntry_info info;
-    size_t pathLen = strlen(path);
     ino_t inode = 0;
 
     /*
      * Append a fake file name so we actually open the directory's contents, not the directory entry one level up
      */
-    if ( pathLen >= BPC_MAXPATHLEN - 3 ) return -1;
-    if ( pathLen == 1 && path[0] == '.' ) {
-        if ( ac->currentDir[0] ) {
-            snprintf(fullPath, sizeof(fullPath), "%s/x", ac->currentDir);
+    if ( path[0] == '.' && path[1] == '\0' ) {
+        if ( ac->currentDir->s[0] ) {
+            bpc_strBuf_snprintf(fullPath, 0, "%s/x", ac->currentDir->s);
         } else {
-            strcpy(fullPath, "/x");
+            bpc_strBuf_strcpy(fullPath, 0, "/x");
         }
-        attr = bpc_attribCache_loadPath(ac, fileName, fullPath);
-        strcpy(path, ".");
+        attr = bpc_attribCache_loadPath(ac, fileName, fullPath->s);
     } else {
-        snprintf(fullPath, BPC_MAXPATHLEN, "%s/x", path);
-        attr = bpc_attribCache_loadPath(ac, fileName, fullPath);
+        bpc_strBuf_snprintf(fullPath, 0, "%s/x", path);
+        attr = bpc_attribCache_loadPath(ac, fileName, fullPath->s);
     }
+    bpc_strBuf_free(fileName);
+    bpc_strBuf_free(fullPath);
     if ( !attr ) return -1;
     attr->lruCnt = ac->cacheLruCnt++;
 
@@ -677,9 +740,9 @@ static void bpc_attribCache_dirWrite(bpc_attribCache_dir *attr, flush_info *info
     if ( !info->ac->readOnly && attr->dirty ) {
         bpc_digest *oldDigest = bpc_attrib_dirDigestGet(&attr->dir);
         if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attribCache_dirWrite: writing %s/%s with %d entries (oldDigest = 0x%02x%02x...)\n",
-                                            info->ac->backupTopDir, (char*)attr->key.key, bpc_hashtable_entryCount(&attr->dir.filesHT),
+                                            info->ac->backupTopDir->s, (char*)attr->key.key, bpc_hashtable_entryCount(&attr->dir.filesHT),
                                             oldDigest ? oldDigest->digest[0] : 0, oldDigest ? oldDigest->digest[1] : 0);
-        if ( (status = bpc_attrib_dirWrite(info->ac->deltaInfo, &attr->dir, info->ac->backupTopDir, attr->key.key, oldDigest)) ) {
+        if ( (status = bpc_attrib_dirWrite(info->ac->deltaInfo, &attr->dir, info->ac->backupTopDir->s, attr->key.key, oldDigest)) ) {
             bpc_logErrf("bpc_attribCache_dirWrite: failed to write attributes for dir %s\n", (char*)attr->key.key);
             info->errorCnt++;
         }
@@ -746,18 +809,20 @@ static void bpc_attribCache_flush_lruList(flush_info *info)
 void bpc_attribCache_flush(bpc_attribCache_info *ac, int all, char *path)
 {
     flush_info info;
-    char attribPath[BPC_MAXPATHLEN];
+    bpc_strBuf *attribPath = bpc_strBuf_new();
 
     info.all      = all;
     info.ac       = ac;
     if ( path ) {
-        char pathDeep[BPC_MAXPATHLEN];
-        char fileName[BPC_MAXPATHLEN], dir[BPC_MAXPATHLEN];
+        bpc_strBuf *pathDeep = bpc_strBuf_new(), *fileName = bpc_strBuf_new(), *dir = bpc_strBuf_new();
 
-        snprintf(pathDeep, BPC_MAXPATHLEN, "%s/foo", path);
-        splitPath(ac, dir, fileName, attribPath, pathDeep);
-        info.path    = attribPath;
+        bpc_strBuf_snprintf(pathDeep, 0, "%s/foo", path);
+        splitPath(ac, dir, fileName, attribPath, pathDeep->s);
+        info.path    = attribPath->s;
         info.pathLen = strlen(info.path);
+        bpc_strBuf_free(pathDeep);
+        bpc_strBuf_free(fileName);
+        bpc_strBuf_free(dir);
     } else {
         info.path    = NULL;
         info.pathLen = 0;
@@ -786,14 +851,15 @@ void bpc_attribCache_flush(bpc_attribCache_info *ac, int all, char *path)
          * Any errors likely mean the deltas are probably out of sync with the
          * file system, so request an fsck.
          */
-        bpc_poolRefRequestFsck(ac->backupTopDir, 1);
+        bpc_poolRefRequestFsck(ac->backupTopDir->s, 1);
     }
+    bpc_strBuf_free(attribPath);
 }
 
 /*
  * Returns the full mangled path, given a file path.
  */
-void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, char *path, char *dirName, int backupNum)
+void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, bpc_strBuf *path, char *dirName, int backupNum)
 {
     char *p;
     int len;
@@ -808,10 +874,10 @@ void bpc_attribCache_getFullMangledPath(bpc_attribCache_info *ac, char *path, ch
         backupNum = ac->backupNum;
     }
 
-    len = snprintf(path, BPC_MAXPATHLEN, "%s/pc/%s/%d/%s", BPC_TopDir, ac->hostName, backupNum, ac->shareName);
-    if ( (dirName[0] == '/' && dirName[1] == '\0') || dirName[0] == '\0' || len >= BPC_MAXPATHLEN - 1 ) {
+    len = bpc_strBuf_snprintf(path, 0, "%s/pc/%s/%d/%s", BPC_TopDir.s, ac->hostName->s, backupNum, ac->shareName->s);
+    if ( (dirName[0] == '/' && dirName[1] == '\0') || dirName[0] == '\0' ) {
         return;
     }
-    path[len++] = '/';
-    bpc_fileNameMangle(path + len, BPC_MAXPATHLEN - len, dirName);
+    bpc_strBuf_strcat(path, len++, "/");
+    bpc_fileNameMangle(path, dirName, len);
 }
