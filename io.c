@@ -438,25 +438,71 @@ static void read_msg_fd(void)
 		break;
         case MSG_RENAME:
                 {
-                    static xbuf rename_buf = EMPTY_XBUF;
+                    static xbuf msg_buf = EMPTY_XBUF;
                     char *bufP, *oldName, *newName;
                     uint32 oldLen, newLen, isTemp;
                         
-                    if ( !rename_buf.size ) {
-                        alloc_xbuf(&rename_buf, 4096);
+                    if ( !msg_buf.size ) {
+                        alloc_xbuf(&msg_buf, 4096);
                     }
-                    if ( len > 0 && (unsigned)len > rename_buf.size - 1 ) {
-                        realloc_xbuf(&rename_buf, len + 4096);
+                    if ( len > 0 && (unsigned)len > msg_buf.size - 1 ) {
+                        realloc_xbuf(&msg_buf, len + 4096);
                     }
-                    readfd(fd, rename_buf.buf, len);
-                    bufP = rename_buf.buf;
+                    readfd(fd, msg_buf.buf, len);
+                    bufP = msg_buf.buf;
                     oldLen = IVAL(bufP, 0);  bufP += sizeof(uint32);
                     newLen = IVAL(bufP, 0);  bufP += sizeof(uint32);
                     isTemp = IVAL(bufP, 0);  bufP += sizeof(uint32);
                     oldName = bufP;          bufP += oldLen;
                     newName = bufP;          bufP += newLen;
 
-                    bpc_rename_request(oldName, newName, isTemp, bufP, rename_buf.buf + len);
+                    bpc_rename_request(oldName, newName, isTemp, bufP, msg_buf.buf + len);
+                }
+                break;
+        case MSG_XATTR_REMOVE:
+                {
+                    static xbuf msg_buf = EMPTY_XBUF;
+                    char *bufP, *path, *name;
+                    uint32 pathLen, nameLen;
+                        
+                    if ( !msg_buf.size ) {
+                        alloc_xbuf(&msg_buf, 4096);
+                    }
+                    if ( len > 0 && (unsigned)len > msg_buf.size - 1 ) {
+                        realloc_xbuf(&msg_buf, len + 4096);
+                    }
+                    readfd(fd, msg_buf.buf, len);
+                    bufP = msg_buf.buf;
+                    pathLen  = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    nameLen  = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    path     = bufP;           bufP += pathLen;
+                    name     = bufP;           bufP += nameLen;
+
+                    bpc_lremovexattr(path, name);
+                }
+                break;
+        case MSG_XATTR_SET:
+                {
+                    static xbuf msg_buf = EMPTY_XBUF;
+                    char *bufP, *path, *name, *value;
+                    uint32 pathLen, nameLen, valueLen;
+                        
+                    if ( !msg_buf.size ) {
+                        alloc_xbuf(&msg_buf, 4096);
+                    }
+                    if ( len > 0 && (unsigned)len > msg_buf.size - 1 ) {
+                        realloc_xbuf(&msg_buf, len + 4096);
+                    }
+                    readfd(fd, msg_buf.buf, len);
+                    bufP = msg_buf.buf;
+                    pathLen  = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    nameLen  = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    valueLen = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    path  = bufP;              bufP += pathLen;
+                    name  = bufP;              bufP += nameLen;
+                    value = bufP;              bufP += valueLen;
+
+                    bpc_lsetxattr(path, name, value, valueLen, 0);
                 }
                 break;
 	default:

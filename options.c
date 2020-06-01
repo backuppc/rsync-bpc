@@ -1328,10 +1328,17 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 
 #ifdef ICONV_OPTION
 	if (iconv_opt && protect_args != 2) {
-		if (!am_server && strcmp(iconv_opt, "-") == 0)
+		if (!am_server && strcmp(iconv_opt, "-") == 0) {
 			iconv_opt = NULL;
-		else
+                } else {
+#ifdef SUPPORT_XATTRS
+                        /* long xattrs can fail when this is set; warn user */
+                        if (preserve_xattrs) {
+                                rprintf(FINFO, "warning: --iconv with --xattrs might fail with long xattrs; try removing --iconv\n");
+                        }
+#endif
 			need_unsorted_flist = 1;
+                }
 	}
 	if (refused_no_iconv && !iconv_opt) {
 		create_refuse_error(refused_no_iconv);

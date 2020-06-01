@@ -239,7 +239,9 @@ enum msgcode {
 	MSG_DELETED=101,/* successfully deleted a file on receiving side */
 	MSG_NO_SEND=102,/* sender failed to open a file we wanted */
 	MSG_DONE=86,	/* current phase is done */
-	MSG_RENAME=88	/* rename request sent from the recevier to generator */
+	MSG_RENAME=88,	        /* rename request sent from the recevier to generator */
+	MSG_XATTR_SET=89,	/* xattr setting request sent from the recevier to generator */
+	MSG_XATTR_REMOVE=90	/* xattr remove request from the recevier to generator */
 };
 
 #define NDX_DONE -1

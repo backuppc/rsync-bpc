@@ -386,11 +386,15 @@ int set_file_attrs(const char *fname, struct file_struct *file, stat_x *sxp,
 	if (!sxp) {
 		if (dry_run)
 			return 1;
-		if (link_stat(fname, &sx2.st, 0) < 0) {
-			rsyserr(FERROR_XFER, errno, "stat %s failed",
-				full_fname(fname));
-			return 0;
-		}
+		if (am_generator) {
+                        if (link_stat(fname, &sx2.st, 0) < 0) {
+                            rsyserr(FERROR_XFER, errno, "stat %s failed",
+                                    full_fname(fname));
+                            return 0;
+                        }
+		} else {
+                        memset(&sx2, 0, sizeof(sx2));
+                }
 #ifdef SUPPORT_ACLS
 		sx2.acc_acl = sx2.def_acl = NULL;
 #endif
