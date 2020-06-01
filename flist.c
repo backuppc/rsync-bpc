@@ -1894,7 +1894,7 @@ void send_extra_file_list(int f, int at_least)
 		else
 			dir_ndx = send_dir_ndx;
 		write_ndx(f, NDX_FLIST_OFFSET - dir_ndx);
-		flist->parent_ndx = dir_ndx;
+		flist->parent_ndx = send_dir_ndx; /* the sending side must remember the sorted ndx value */
 
 		send1extra(f, file, flist);
 		prev_flags = file->flags;
