@@ -1387,6 +1387,12 @@ int bpc_lutime(const char *fileName, time_t mtime)
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lutime(%s)\n", fileName);
 
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
+        if ( !am_generator ) {
+            /*
+             * ignore receive utime setting
+             */
+            return 0;
+        }
         errno = ENOENT;
         return -1;
     }
@@ -1555,7 +1561,9 @@ int bpc_rename(const char *oldName, const char *newName)
         }
     }
     if ( !fileNew || fileAttrChanged ) {
-        bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, 1);
+	if ( oldIsTemp ) {
+	    bpc_poolRefDeltaUpdate(&DeltaNew, file->compress, &file->digest, 1);
+	}
         bpc_attribCache_setFile(&acNew, (char*)newName, file, 0);
     }
     bpc_attribCache_deleteFile(&acNew, (char*)oldName);
@@ -1571,7 +1579,6 @@ int bpc_rename_request(char *oldName, char *newName, uint32 isTemp, char *bufP, 
         bpc_logErrf("bpc_rename_request(%s,%s) got to %p vs end = %p\n", oldName, newName, bufP, bufEnd);
     }
     file->isTemp = isTemp;
-
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_rename_request: name = %s, xattr cnt = %d\n", file->name, bpc_hashtable_entryCount(&file->xattrHT));
     return bpc_rename(oldName, newName);
 }
