@@ -1331,7 +1331,7 @@ int bpc_lutimes(const char *fileName, struct timeval *t)
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
         if ( !am_generator ) {
             /*
-             * ignore receive utime setting
+             * ignore receive lutimes setting
              */
             return 0;
         }
@@ -1389,7 +1389,7 @@ int bpc_lutime(const char *fileName, time_t mtime)
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
         if ( !am_generator ) {
             /*
-             * ignore receive utime setting
+             * ignore receive lutime setting
              */
             return 0;
         }
