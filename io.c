@@ -1597,25 +1597,73 @@ static void read_a_msg(void)
 		break;
         case MSG_RENAME:
                 {
-                    static xbuf rename_buf = EMPTY_XBUF;
+                    static xbuf msg_buf = EMPTY_XBUF;
                     char *bufP, *oldName, *newName;
                     uint32 oldLen, newLen, isTemp;
-
-                    if ( !rename_buf.size ) {
-                        alloc_xbuf(&rename_buf, 4096);
+                        
+                    if ( !msg_buf.size ) {
+                        alloc_xbuf(&msg_buf, 4096);
                     }
-                    if ( msg_bytes > 0 && (unsigned)msg_bytes > rename_buf.size - 1 ) {
-                        realloc_xbuf(&rename_buf, msg_bytes + 4096);
+                    if ( msg_bytes > 0 && (unsigned)msg_bytes > msg_buf.size - 1 ) {
+                        realloc_xbuf(&msg_buf, msg_bytes + 4096);
                     }
-                    raw_read_buf(rename_buf.buf, msg_bytes);
-                    bufP = rename_buf.buf;
+                    raw_read_buf(msg_buf.buf, msg_bytes);
+                    bufP = msg_buf.buf;
                     oldLen = IVAL(bufP, 0);  bufP += sizeof(uint32);
                     newLen = IVAL(bufP, 0);  bufP += sizeof(uint32);
                     isTemp = IVAL(bufP, 0);  bufP += sizeof(uint32);
                     oldName = bufP;          bufP += oldLen;
                     newName = bufP;          bufP += newLen;
 
-                    bpc_rename_request(oldName, newName, isTemp, bufP, rename_buf.buf + msg_bytes);
+                    bpc_rename_request(oldName, newName, isTemp, bufP, msg_buf.buf + msg_bytes);
+                    iobuf.in_multiplexed = 1;
+                }
+                break;
+        case MSG_XATTR_REMOVE:
+                {
+                    static xbuf msg_buf = EMPTY_XBUF;
+                    char *bufP, *path, *name;
+                    uint32 pathLen, nameLen;
+                        
+                    if ( !msg_buf.size ) {
+                        alloc_xbuf(&msg_buf, 4096);
+                    }
+                    if ( msg_bytes > 0 && (unsigned)msg_bytes > msg_buf.size - 1 ) {
+                        realloc_xbuf(&msg_buf, msg_bytes + 4096);
+                    }
+                    raw_read_buf(msg_buf.buf, msg_bytes);
+                    bufP = msg_buf.buf;
+                    pathLen  = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    nameLen  = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    path     = bufP;           bufP += pathLen;
+                    name     = bufP;           bufP += nameLen;
+
+                    bpc_lremovexattr(path, name);
+                    iobuf.in_multiplexed = 1;
+                }
+                break;
+        case MSG_XATTR_SET:
+                {
+                    static xbuf msg_buf = EMPTY_XBUF;
+                    char *bufP, *path, *name, *value;
+                    uint32 pathLen, nameLen, valueLen;
+                        
+                    if ( !msg_buf.size ) {
+                        alloc_xbuf(&msg_buf, 4096);
+                    }
+                    if ( msg_bytes > 0 && (unsigned)msg_bytes > msg_buf.size - 1 ) {
+                        realloc_xbuf(&msg_buf, msg_bytes + 4096);
+                    }
+                    raw_read_buf(msg_buf.buf, msg_bytes);
+                    bufP = msg_buf.buf;
+                    pathLen  = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    nameLen  = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    valueLen = IVAL(bufP, 0);  bufP += sizeof(uint32);
+                    path  = bufP;              bufP += pathLen;
+                    name  = bufP;              bufP += nameLen;
+                    value = bufP;              bufP += valueLen;
+
+                    bpc_lsetxattr(path, name, value, valueLen, 0);
                     iobuf.in_multiplexed = 1;
                 }
                 break;

@@ -19,6 +19,7 @@
 
 #include "backuppc/backuppc.h"
 #include "ifuncs.h"
+#include "lib/sysxattrs.h"
 
 #define MAX_FD          (64)
 #define MAX_BUF_SZ      (8 << 20)               /* 8MB */
@@ -286,8 +287,8 @@ static void bpc_fileDescFree(FdInfo *fd)
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_fileDescFree: fdNum = %d, tmpFd = %d, tmpFileName = %s\n", fd->fdNum, fd->tmpFd, fd->tmpFd >= 0 ? fd->tmpFileName->s : "NULL");
 
     if ( fd->tmpFd >= 0 ) {
-        unlink(fd->tmpFileName->s);
         close(fd->tmpFd);
+        unlink(fd->tmpFileName->s);
         fd->tmpFd = -1;
     }
     if ( fd->buffer ) {
@@ -908,6 +909,12 @@ int bpc_lchmod(const char *fileName, mode_t mode)
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lchmod(%s, 0%o)\n", fileName, mode);
 
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
+        if ( !am_generator ) {
+            /*
+             * ignore receive lchmod setting
+             */
+            return 0;
+        }
         errno = ENOENT;
         return -1;
     }
@@ -1327,6 +1334,12 @@ int bpc_lutimes(const char *fileName, struct timeval *t)
 
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lutimes(%s)\n", fileName);
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
+        if ( !am_generator ) {
+            /*
+             * ignore receive lutimes setting
+             */
+            return 0;
+        }
         errno = ENOENT;
         return -1;
     }
@@ -1379,6 +1392,12 @@ int bpc_lutime(const char *fileName, time_t mtime)
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lutime(%s)\n", fileName);
 
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
+        if ( !am_generator ) {
+            /*
+             * ignore receive lutime setting
+             */
+            return 0;
+        }
         errno = ENOENT;
         return -1;
     }
@@ -1426,6 +1445,12 @@ int bpc_lchown(const char *fileName, uid_t uid, gid_t gid)
                                     fileName, (unsigned long)uid, (unsigned long)gid);
 
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0)) ) {
+        if ( !am_generator ) {
+            /*
+             * ignore receive lchown setting
+             */
+            return 0;
+        }
         errno = ENOENT;
         return -1;
     }
@@ -1447,13 +1472,13 @@ int bpc_rename(const char *oldName, const char *newName)
     bpc_attrib_file *file, *fileNew;
     int oldIsTemp, fileAttrChanged = 0;
 
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_rename(%s, %s)\n", oldName, newName);
+
     if ( !(file = bpc_attribCache_getFile(&acNew, (char*)oldName, 0, 0)) ) {
         if ( LogLevel >= 4 ) bpc_logMsgf("bpc_rename: %s doesn't exist\n", oldName);
         errno = ENOENT;
         return -1;
     }
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_rename(%s, %s); oldIsTemp = %d\n", oldName, newName, file->isTemp);
-
     if ( !am_generator ) {
         /*
          * We don't do renames on the receiver, since it's too hard to keep attribute updates on
@@ -1467,8 +1492,8 @@ int bpc_rename(const char *oldName, const char *newName)
         if ( !rename_msg.size ) {
             alloc_xbuf(&rename_msg, 4096);
         }
-        if ( rename_msg.size < 2 * sizeof(uint32) + oldLen + newLen + 1024 ) {
-            realloc_xbuf(&rename_msg, 2 * sizeof(uint32) + oldLen + newLen + 1024);
+        if ( rename_msg.size < 3 * sizeof(uint32) + oldLen + newLen + 1024 ) {
+            realloc_xbuf(&rename_msg, 3 * sizeof(uint32) + oldLen + newLen + 1024);
         }
         bufP = rename_msg.buf;
         SIVAL(bufP, 0, oldLen);        bufP += sizeof(uint32);
@@ -1985,23 +2010,30 @@ ssize_t bpc_lgetxattr(const char *path, const char *name, void *value, size_t si
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)path, 0, 0);
     bpc_attrib_xattr *xattr;
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s)\n", path, name);
-
     if ( !file ) {
+        if ( !am_generator ) {
+            errno = ENOATTR;
+            if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s, %lu) -> no file, but return no xattr found\n", path, name, size);
+            return -1;
+        }
         errno = ENOENT;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s, %lu) -> file not found\n", path, name, size);
         return -1;
     }
     if ( !(xattr = bpc_attrib_xattrGet(file, (char*)name, strlen(name) + 1, 0)) ) {
-        errno = ENOENT;
+        errno = ENOATTR;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s, %lu) -> xattr not found\n", path, name, size);
         return -1;
     }
-    if ( !value ) return xattr->valueLen;
+    if ( !value || size == 0 ) return xattr->valueLen;
     if ( xattr->valueLen <= size ) {
         memcpy(value, xattr->value, xattr->valueLen);
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s, %lu) -> returning value len %u\n", path, name, size, xattr->valueLen);
         return xattr->valueLen;
     } else {
-        memcpy(value, xattr->value, size);
-        return size;
+        errno = ERANGE;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lgetxattr(%s, %s, %lu) -> return buffer too small (len %u)\n", path, name, size, xattr->valueLen);
+        return -1;
     }
 }
 
@@ -2019,15 +2051,41 @@ ssize_t bpc_fgetxattr(int filedes, const char *name, void *value, size_t size)
 
 int bpc_lsetxattr(const char *path, const char *name, const void *value, size_t size, UNUSED(int flags))
 {
-    int ret;
-
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s)\n", path, name);
-
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)path, 0, 0);
     bpc_attrib_xattr *xattr;
+    int ret;
+
+    if ( !am_generator && (!file || !file->isTemp) ) {
+        /*
+         * We don't set xattrs for non-temp files on the receiver, since it's too hard to keep
+         * attribute updates on both the generator and receiver sycnhronized.  Send the xattr
+         * setting to the generator so it can do the setting.
+         */
+        static xbuf rename_msg = EMPTY_XBUF;
+        char *bufP;
+        uint32 pathLen = strlen(path) + 1, nameLen = strlen(name) + 1;
+
+        if ( !rename_msg.size ) {
+            alloc_xbuf(&rename_msg, 4096);
+        }
+        if ( rename_msg.size < 3 * sizeof(uint32) + pathLen + nameLen + size + 1024 ) {
+            realloc_xbuf(&rename_msg, 3 * sizeof(uint32) + pathLen + nameLen + size + 1024);
+        }
+        bufP = rename_msg.buf;
+        SIVAL(bufP, 0, pathLen);       bufP += sizeof(uint32);
+        SIVAL(bufP, 0, nameLen);       bufP += sizeof(uint32);
+        SIVAL(bufP, 0, size);          bufP += sizeof(uint32);
+        memcpy(bufP, path, pathLen);   bufP += pathLen;
+        memcpy(bufP, name, nameLen);   bufP += nameLen;
+        memcpy(bufP, value, size);     bufP += size;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s, %lu) -> sending to gen (len=%d)\n", path, name, size, bufP - rename_msg.buf);
+        send_msg(MSG_XATTR_SET, rename_msg.buf, bufP - rename_msg.buf, 0);
+        return 0;
+    }
 
     if ( !file ) {
         errno = ENOENT;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s, %lu) -> file not found\n", path, name, size);
         return -1;
     }
 
@@ -2037,7 +2095,7 @@ int bpc_lsetxattr(const char *path, const char *name, const void *value, size_t 
      */
     if ( (xattr = bpc_attrib_xattrGet(file, (char*)name, strlen(name) + 1, 0)) ) {
         if ( xattr->valueLen == size && !memcmp(xattr->value, value, xattr->valueLen) ) {
-            if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s) unchanged\n", path, name);
+            if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s, %lu) -> xattr unchanged\n", path, name, size);
             return 0;
         }
     }
@@ -2054,30 +2112,58 @@ int bpc_lsetxattr(const char *path, const char *name, const void *value, size_t 
     /*
      * now set the new attribute value
      */
-    if ( (ret = bpc_attrib_xattrSetValue(file, (char*)name, strlen(name) + 1, (void*)value, size)) < 0 ) {
-        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s) -> return %d\n", path, name, ret);
-        return ret;
-    }
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s) -> return %d\n", path, name, 0);
-    return 0;
+    ret = bpc_attrib_xattrSetValue(file, (char*)name, strlen(name) + 1, (void*)value, size);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s, %lu, %d) -> return %d\n", path, name, size, ret, file->isTemp);
+    bpc_attribCache_setFile(&acNew, (char*)path, file, 0);
+    return ret;
 }
 
 int bpc_lremovexattr(const char *path, const char *name)
 {
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)path, 0, 0);
     bpc_attrib_xattr *xattr;
+    int ret;
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lremovexattr(%s, %s)\n", path, name);
+    if ( !am_generator && (!file || !file->isTemp) ) {
+        /*
+         * We don't remove xattrs for non-temp files on the receiver, since it's too hard to keep
+         * attribute updates on both the generator and receiver sycnhronized.  Send the xattr
+         * setting to the generator so it can do the setting.
+         */
+        static xbuf rename_msg = EMPTY_XBUF;
+        char *bufP;
+        uint32 pathLen = strlen(path) + 1, nameLen = strlen(name) + 1;
+
+        if ( !rename_msg.size ) {
+            alloc_xbuf(&rename_msg, 4096);
+        }
+        if ( rename_msg.size < 3 * sizeof(uint32) + pathLen + nameLen + 1024 ) {
+            realloc_xbuf(&rename_msg, 3 * sizeof(uint32) + pathLen + nameLen + 1024);
+        }
+        bufP = rename_msg.buf;
+        SIVAL(bufP, 0, pathLen);       bufP += sizeof(uint32);
+        SIVAL(bufP, 0, nameLen);       bufP += sizeof(uint32);
+        memcpy(bufP, path, pathLen);   bufP += pathLen;
+        memcpy(bufP, name, nameLen);   bufP += nameLen;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lremovexattr(%s, %s) -> sending to gen (len=%d)\n", path, name, bufP - rename_msg.buf);
+        send_msg(MSG_XATTR_REMOVE, rename_msg.buf, bufP - rename_msg.buf, 0);
+        return 0;
+    }
 
     if ( !file ) {
         errno = ENOENT;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lremovexattr(%s, %s) -> file not found\n", path, name);
         return -1;
     }
 
     /*
      * Check if the attribute is exists - if not then quietly return.
      */
-    if ( !(xattr = bpc_attrib_xattrGet(file, (char*)name, strlen(name) + 1, 0)) ) return 0;
+    if ( !(xattr = bpc_attrib_xattrGet(file, (char*)name, strlen(name) + 1, 0)) ) {
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lremovexattr(%s, %s) -> xattr not found\n", path, name);
+        errno = ENOATTR;
+        return -1;
+    }
 
     /*
      * Save away the attributes in old if not recently set and not present already
@@ -2091,18 +2177,25 @@ int bpc_lremovexattr(const char *path, const char *name)
     /*
      * now remove the attribute
      */
-    return bpc_attrib_xattrDelete(file, (char*)name, strlen(name) + 1);
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lremovexattr(%s, %s) -> xattr removed\n", path, name);
+    ret = bpc_attrib_xattrDelete(file, (char*)name, strlen(name) + 1);
+    bpc_attribCache_setFile(&acNew, (char*)path, file, 0);
+    return ret;
 }
 
 ssize_t bpc_llistxattr(const char *path, char *list, size_t size)
 {
     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)path, 0, 0);
 
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_llistxattr(%s)\n", path);
-
     if ( !file ) {
+        if ( !am_generator ) {
+            if ( LogLevel >= 4 ) bpc_logMsgf("bpc_llistxattr(%s) -> no file, but return 0\n", path);
+            return 0;
+        }
         errno = ENOENT;
+        if ( LogLevel >= 4 ) bpc_logMsgf("bpc_llistxattr(%s) -> file not found\n", path);
         return -1;
     }
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_llistxattr(%s):\n", path);
     return bpc_attrib_xattrList(file, list, size, 1);
 }

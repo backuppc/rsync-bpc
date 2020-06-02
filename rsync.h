@@ -246,7 +246,9 @@ enum msgcode {
 	MSG_SUCCESS=100,/* successfully updated indicated flist index */
 	MSG_DELETED=101,/* successfully deleted a file on receiving side */
 	MSG_NO_SEND=102,/* sender failed to open a file we wanted */
-        MSG_RENAME=104  /* rename request sent from the recevier to generator */
+        MSG_RENAME=104,          /* rename request sent from the recevier to generator */
+        MSG_XATTR_SET=105,       /* xattr setting request sent from the recevier to generator */
+        MSG_XATTR_REMOVE=106     /* xattr remove request from the recevier to generator */
 };
 
 #define NDX_DONE -1
