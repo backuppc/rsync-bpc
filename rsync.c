@@ -464,13 +464,19 @@ int set_file_attrs(const char *fname, struct file_struct *file, stat_x *sxp,
 	if (!sxp) {
 		if (dry_run)
 			return 1;
-		if (am_generator) {
-                        if (link_stat(fname, &sx2.st, 0) < 0) {
-                            rsyserr(FERROR_XFER, errno, "stat %s failed",
-                                    full_fname(fname));
-                            return 0;
+                if (link_stat(fname, &sx2.st, 0) < 0) {
+                        if (am_generator) {
+                                rsyserr(FERROR_XFER, errno, "stat %s failed",
+                                        full_fname(fname));
+                                return 0;
                         }
-		} else {
+                        /*
+                         * In rsync-bpc, the receiver process doesn't see the cached file
+                         * attributes for non-regular files, since they are only in the
+                         * generator process.  So it's normal for the receiver link_stat()
+                         * to fail.  We proceed with empty stats instead of returning with
+                         * an error.
+                         */
                         memset(&sx2, 0, sizeof(sx2));
                 }
 		init_stat_x(&sx2);
