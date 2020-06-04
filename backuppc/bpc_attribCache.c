@@ -229,43 +229,43 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, c
             bpc_attrib_dir dir;
             ssize_t entrySize;
             char *entries, *fileName;
-            int attribFileExists, attribDirExists = 1;
-            STRUCT_STAT st;
 
             snprintf(topDir, sizeof(topDir), "%s/pc/%s/%d", BPC_TopDir, ac->hostName, ac->bkupMergeList[i].num);
             snprintf(fullAttribPath, sizeof(fullAttribPath), "%s/%s", topDir, attribPath);
 
-            attribFileExists = !stat(fullAttribPath, &st) && S_ISREG(st.st_mode);
-
-            if ( !attribFileExists ) {
-                char *p;
-                if ( (p = strrchr(fullAttribPath, '/')) ) {
-                    *p = '\0';
-                    attribDirExists = !stat(fullAttribPath, &st) && S_ISDIR(st.st_mode);
-                }
-            }
-            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadPath: path = %s, file exists = %d, dir exists = %d\n", fullAttribPath, attribFileExists, attribDirExists);
-
-            if ( ac->bkupMergeList[i].version < 4 && i == ac->bkupMergeCnt - 1 && !attribFileExists && !attribDirExists ) {
-                /*
-                 * For V3, if the last backup doesn't have a directory, then the merged view is empty
-                 */
-                bpc_attrib_dirDestroy(&attr->dir);
-                bpc_attrib_dirInit(&attr->dir, ac->compress);
-                break;
-            }
-            if ( (ac->bkupMergeList[i].version < 4 && !attribFileExists) || !attribDirExists ) {
-                /*
-                 * nothing to update here - keep going
-                 */
-                continue;
-            }
             bpc_attrib_dirInit(&dir, ac->bkupMergeList[i].compress);
             if ( (status = bpc_attrib_dirRead(&dir, topDir, attribPath, ac->bkupMergeList[i].num)) ) {
+                if ( ac->bkupMergeList[i].version < 4 ) {
+                    char *p;
+                    int attribDirExists = 1;
+                    STRUCT_STAT st;
+
+                    if ( (p = strrchr(fullAttribPath, '/')) ) {
+                        *p = '\0';
+                        attribDirExists = !stat(fullAttribPath, &st) && S_ISDIR(st.st_mode);
+                        *p = '/';
+                    }
+                    if ( i == ac->bkupMergeCnt - 1 && !attribDirExists ) {
+                        /*
+                         * For V3, if the last backup doesn't have a directory, then the merged view is empty
+                         */
+                        bpc_attrib_dirDestroy(&dir);
+                        bpc_attrib_dirDestroy(&attr->dir);
+                        bpc_attrib_dirInit(&attr->dir, ac->compress);
+                        break;
+                    }
+                    if ( !attribDirExists ) {
+                        /*
+                         * nothing to update here - keep going
+                         */
+                        bpc_attrib_dirDestroy(&dir);
+                        continue;
+                    }
+                }
                 bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s/%s) returned %d\n", topDir, attribPath, status);
             }
             entrySize = bpc_attrib_getEntries(&dir, NULL, 0);
-            if ( (entries = malloc(entrySize)) && bpc_attrib_getEntries(&dir, entries, entrySize) == entrySize ) {
+            if ( (entries = malloc(entrySize + 1)) && bpc_attrib_getEntries(&dir, entries, entrySize) == entrySize ) {
                 for ( fileName = entries ; fileName < entries + entrySize ; fileName += strlen(fileName) + 1 ) {
                     bpc_attrib_file *file = bpc_attrib_fileGet(&dir, fileName, 0);
                     if ( !file ) continue;
@@ -353,30 +353,25 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
             bpc_attrib_dir dir;
             ssize_t entrySize;
             char *entries, *fileName;
-            int attribFileExists, attribDirExists = 1;
-            STRUCT_STAT st;
 
             snprintf(inodeDir, sizeof(inodeDir), "%s/pc/%s/%d/%s", BPC_TopDir, ac->hostName, ac->bkupMergeList[i].num, attribDir);
             snprintf(fullAttribPath, sizeof(fullAttribPath), "%s/%s", inodeDir, attribFile);
 
-            attribFileExists = !stat(fullAttribPath, &st) && S_ISREG(st.st_mode);
-            if ( !attribFileExists ) {
-                attribDirExists = !stat(inodeDir, &st) && S_ISDIR(st.st_mode);
-            }
-            if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadInode: path = %s, file exists = %d, dir exists = %d\n", fullAttribPath, attribFileExists, attribDirExists);
-
-            if ( (ac->bkupMergeList[i].version < 4 && !attribFileExists) || !attribDirExists ) {
-                /*
-                 * nothing to update here - keep going
-                 */
-                continue;
-            }
             bpc_attrib_dirInit(&dir, ac->bkupMergeList[i].compress);
             if ( (status = bpc_attrib_dirRead(&dir, inodeDir, attribFile, ac->bkupMergeList[i].num)) ) {
+                STRUCT_STAT st;
+                int attribDirExists = !stat(inodeDir, &st) && S_ISDIR(st.st_mode);
+                if ( ac->bkupMergeList[i].version < 4 || !attribDirExists ) {
+                     /*
+                      * nothing to update here - keep going
+                      */
+                     bpc_attrib_dirDestroy(&dir);
+                     continue;
+                }
                 bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", inodeDir, attribFile, status);
             }
             entrySize = bpc_attrib_getEntries(&dir, NULL, 0);
-            if ( (entries = malloc(entrySize)) && bpc_attrib_getEntries(&dir, entries, entrySize) == entrySize ) {
+            if ( (entries = malloc(entrySize + 1)) && bpc_attrib_getEntries(&dir, entries, entrySize) == entrySize ) {
                 for ( fileName = entries ; fileName < entries + entrySize ; fileName += strlen(fileName) + 1 ) {
                     bpc_attrib_file *file = bpc_attrib_fileGet(&dir, fileName, 0);
                     if ( !file ) continue;
