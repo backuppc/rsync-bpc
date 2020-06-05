@@ -2072,7 +2072,7 @@ int bpc_lsetxattr(const char *path, const char *name, const void *value, size_t 
     ret = bpc_attrib_xattrSetValue(file, (char*)name, strlen(name) + 1, (void*)value, size);
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lsetxattr(%s, %s, %lu, %d) -> return %d\n", path, name, size, ret, file->isTemp);
     bpc_attribCache_setFile(&acNew, (char*)path, file, 0);
-    return ret;
+    return ret < 0 ? ret : 0;
 }
 
 int bpc_lremovexattr(const char *path, const char *name)
