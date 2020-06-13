@@ -1,8 +1,4 @@
-NEWS for rsync-bpc 3.1.2
-
-3.1.2.0 released 1 Dec 2018.
-
-28 Dec 2017: initial beta version based on rsync 3.1.2 (not released)
+NEWS for rsync-bpc 3.1.3
 
 NEWS for rsync 3.1.3 (28 Jan 2018)
 Protocol: 31 (unchanged)
