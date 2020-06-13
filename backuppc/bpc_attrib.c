@@ -129,7 +129,9 @@ int bpc_attrib_xattrSetValue(bpc_attrib_file *file, void *key, int keyLen, void 
         bpc_strBuf_resize(keyCopy, keyLen + 16);
         memcpy(keyCopy->s, key, keyLen);
         keyCopy->s[keyLen++] = 0x0;
-        bpc_logMsgf("bpc_attrib_xattrSetValue: BOTCH: appended 0x0 to xattr name '%s' (keyLen now %u)\n", (char*)key, keyLen);
+        if ( BPC_LogLevel >= 6 ) {
+            bpc_logMsgf("bpc_attrib_xattrSetValue: fixup: appended 0x0 to xattr name '%s' (keyLen now %u)\n", (char*)key, keyLen);
+        }
         ret = bpc_attrib_xattrSetValue(file, keyCopy->s, keyLen, value, valueLen);
         bpc_strBuf_free(keyCopy);
         return ret;
