@@ -898,6 +898,8 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 #ifdef CAN_SET_NSEC
 	if (modtime_nsec)
 		extra_len += EXTRA_LEN;
+#else
+        (void)modtime_nsec;
 #endif
 	if (file_length < 0) {
 		rprintf(FERROR, "Offset underflow: file-length is negative\n");
