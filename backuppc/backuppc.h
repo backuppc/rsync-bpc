@@ -251,6 +251,11 @@ void bpc_logMsgErrorCntGet(unsigned long *errorCnt);
 void bpc_logMsgCBSet(void (*cb)(int errFlag, char *mesg, size_t mesgLen));
 
 /*
+ * Compute file digest
+ */
+int bpc_fileDigest(char *fileName, int compress, bpc_digest *digest);
+
+/*
  * Directory operations
  */
 int bpc_path_create(char *path);
