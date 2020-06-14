@@ -309,6 +309,7 @@ typedef struct {
 typedef struct {
     bpc_digest digest;
     ushort compress;
+    ushort needRewrite;
     /*
      * hash table of bpc_attrib_file entries, indexed by file name
      */
@@ -334,12 +335,13 @@ int bpc_attrib_fileCount(bpc_attrib_dir *dir);
 char *bpc_attrib_fileType2Text(int type);
 void bpc_attrib_dirInit(bpc_attrib_dir *dir, int compressLevel);
 void bpc_attrib_dirDestroy(bpc_attrib_dir *dir);
+int bpc_attrib_dirNeedRewrite(bpc_attrib_dir *dir);
 ssize_t bpc_attrib_getEntries(bpc_attrib_dir *dir, char *entries, ssize_t entrySize);
 void bpc_attrib_dirRefCount(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, int incr);
 void bpc_attrib_dirRefCountInodeMax(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, int incr, unsigned int *inodeMax);
 void bpc_attrib_attribFilePath(char *path, char *dir, char *attribFileName);
 bpc_digest *bpc_attrib_dirDigestGet(bpc_attrib_dir *dir);
-uchar *bpc_attrib_buf2file(bpc_attrib_file *file, uchar *buf, uchar *bufEnd, int xattrNumEntries);
+uchar *bpc_attrib_buf2file(bpc_attrib_file *file, uchar *buf, uchar *bufEnd, int xattrNumEntries, int *xattrFixup);
 uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *buf, uchar *bufEnd);
 uchar *bpc_attrib_file2buf(bpc_attrib_file *file, uchar *buf, uchar *bufEnd);
 int bpc_attrib_digestRead(bpc_attrib_dir *dir, bpc_digest *digest, char *attribPath);
