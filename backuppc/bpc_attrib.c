@@ -1281,26 +1281,27 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
         }
         attribPath[attribPathLen++] = '_';
         bpc_digest_digest2str(&digest, attribPath + attribPathLen);
+        /*
+         * Now create an empty attrib file with the file name digest
+         */
+        if ( (fdNum = open(attribPathTemp, O_WRONLY | O_CREAT | O_TRUNC, 0660)) < 0 ) {
+            bpc_logErrf("bpc_attrib_dirWrite: can't open/create raw %s for writing\n", attribPathTemp);
+            return -1;
+        }
+        close(fdNum);
+        if ( rename(attribPathTemp, attribPath) ) {
+            bpc_logErrf("bpc_attrib_dirWrite: rename from %s to %s failed\n", attribPathTemp, attribPath);
+            return -1;
+        }
+        if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: created new attrib file %s\n", attribPath);
     } else {
-        digest.len = 0;
+        memset(&digest, 0, sizeof(digest));
         attribPath[attribPathLen++] = '_';
         strcpy(attribPath + attribPathLen, "0");
+        if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: skipping creating new empty attrib file %s\n", attribPath);
+        unlink(attribPath);
     }
     
-    /*
-     * Now create an empty attrib file
-     */
-    if ( (fdNum = open(attribPathTemp, O_WRONLY | O_CREAT | O_TRUNC, 0660)) < 0 ) {
-        bpc_logErrf("bpc_attrib_dirWrite: can't open/create raw %s for writing\n", attribPathTemp);
-        return -1;
-    }
-    close(fdNum);
-    if ( rename(attribPathTemp, attribPath) ) {
-        bpc_logErrf("bpc_attrib_dirWrite: rename from %s to %s failed\n", attribPathTemp, attribPath);
-        return -1;
-    }
-    if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: created new attrib file %s\n", attribPath);
-
     if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x...\n",
                 digest.digest[0], digest.digest[1], digest.digest[2],
                 oldDigest ? oldDigest->digest[0] : 0x0, oldDigest ? oldDigest->digest[1] : 0x0);
