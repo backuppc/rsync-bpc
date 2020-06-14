@@ -1265,6 +1265,7 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
     char *p;
     int fdNum;
     size_t attribPathLen, baseAttribFileNameLen;
+    int digestChanged;
 
     if ( WriteOldStyleAttribFile ) return bpc_attrib_dirWriteOld(deltaInfo, dir, dirPath, attribFileName, oldDigest);
 
@@ -1353,10 +1354,14 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
     if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x...\n",
                 digest.digest[0], digest.digest[1], digest.digest[2],
                 oldDigest ? oldDigest->digest[0] : 0x0, oldDigest ? oldDigest->digest[1] : 0x0);
-    bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, &digest, 1);
+
+    digestChanged = !oldDigest || bpc_digest_compare(&digest, oldDigest);
+    if ( digestChanged && digest.len > 0 ) {
+        bpc_poolRefDeltaUpdate(deltaInfo, dir->compress, &digest, 1);
+    }
 
     if ( oldDigest ) {
-        if ( !bpc_digest_compare(&digest, oldDigest) ) {
+        if ( !digestChanged ) {
             if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: old attrib has same digest; no changes to ref counts\n");
             bpc_strBuf_free(attribPath);
             bpc_strBuf_free(attribPathTemp);
