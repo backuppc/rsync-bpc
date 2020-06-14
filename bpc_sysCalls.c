@@ -35,6 +35,7 @@ extern int am_generator;
 extern int always_checksum;
 extern int preserve_hard_links;
 extern int protocol_version;
+extern int preserve_times;
 
 static bpc_attribCache_info acNew;
 static bpc_attribCache_info acOld;
@@ -1875,6 +1876,13 @@ int bpc_mkdir(const char *dirName, mode_t mode)
     file->type  = BPC_FTYPE_DIR;
     file->mode  = mode;
     file->inode = Stats.InodeCurr;
+    if ( !(preserve_times & PRESERVE_DIR_TIMES) ) {
+        /*
+         * Normally dir mtimes are set later. But if --omit-dir-times was
+         * specified, then we need to set to a reasonable value, ie now.
+         */
+        file->mtime = time(NULL);
+    }
     Stats.InodeCurr += 2;
     bpc_attribCache_setFile(&acNew, (char*)dirName, file, 0);
     if ( !*dirName ) {
