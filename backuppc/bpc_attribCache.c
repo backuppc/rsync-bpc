@@ -239,7 +239,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, b
         for ( i = 0 ; i < ac->bkupMergeCnt ; i++ ) {
             bpc_attrib_dir dir;
             ssize_t entrySize;
-            char *entries, *fileName;
+            char *entries, *entry;
 
             bpc_strBuf_snprintf(topDir, 0, "%s/pc/%s/%d", BPC_TopDir.s, ac->hostName->s, ac->bkupMergeList[i].num);
             bpc_strBuf_snprintf(fullAttribPath, 0, "%s/%s", topDir->s, attribPath->s);
@@ -275,27 +275,30 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, b
                 }
                 bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s/%s) returned %d\n", topDir->s, attribPath->s, status);
             }
+            if ( bpc_attrib_dirNeedRewrite(&dir) ) {
+                attr->dirty = 1;
+            }
             entrySize = bpc_attrib_getEntries(&dir, NULL, 0);
             if ( (entries = malloc(entrySize + 1)) && bpc_attrib_getEntries(&dir, entries, entrySize) == entrySize ) {
-                for ( fileName = entries ; fileName < entries + entrySize ; fileName += strlen(fileName) + 1 ) {
-                    bpc_attrib_file *file = bpc_attrib_fileGet(&dir, fileName, 0);
+                for ( entry = entries ; entry < entries + entrySize ; entry += strlen(entry) + 1 ) {
+                    bpc_attrib_file *file = bpc_attrib_fileGet(&dir, entry, 0);
                     if ( !file ) continue;
                     if ( file->type == BPC_FTYPE_DELETED ) {
-                        bpc_attrib_fileDeleteName(&attr->dir, fileName);
+                        bpc_attrib_fileDeleteName(&attr->dir, entry);
                     } else {
                         bpc_attrib_file *fileDest;
 
-                        if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, fileName, 1)) ) {
+                        if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, entry, 1)) ) {
                             bpc_strBuf_free(attribPath);
                             bpc_strBuf_free(topDir);
                             bpc_strBuf_free(fullAttribPath);
                             return NULL;
                         }
-                        if ( fileDest->key.key == fileName ) {
+                        if ( fileDest->key.key == entry ) {
                             /*
                              * new entry - initialize
                              */
-                            bpc_attrib_fileInit(fileDest, fileName, 0);
+                            bpc_attrib_fileInit(fileDest, entry, 0);
                         }
                         bpc_attrib_fileCopy(fileDest, file);
                         fileDest->backupNum = ac->bkupMergeList[i].num;
@@ -323,10 +326,16 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, b
         if ( (status = bpc_attrib_dirRead(&attr->dir, ac->backupTopDir->s, attribPath->s, ac->backupNum)) ) {
             bpc_logErrf("bpc_attribCache_loadPath: bpc_attrib_dirRead(%s, %s) returned %d\n", ac->backupTopDir->s, attribPath->s, status);
         }
+        if ( bpc_attrib_dirNeedRewrite(&attr->dir) ) {
+            attr->dirty = 1;
+        }
         /*
          * remove any extraneous BPC_FTYPE_DELETED file types
          */
 	bpc_hashtable_iterate(&attr->dir.filesHT, (void*)bpc_attribCache_removeDeletedEntries, attr);
+    }
+    if ( attr->dirty ) {
+        if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attribCache_loadPath: will rewrite path = %s -> dir = %s, fileName = %s, attribPath = %s\n", path, dirStr->s, fileName, attribPath->s);
     }
     if ( bpc_hashtable_entryCount(&ac->attrHT) > BPC_ATTRIBCACHE_DIR_COUNT_MAX ) {
         bpc_attribCache_flush(ac, 0, NULL);
@@ -382,7 +391,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
         for ( i = 0 ; i < ac->bkupMergeCnt ; i++ ) {
             bpc_attrib_dir dir;
             ssize_t entrySize;
-            char *entries, *fileName;
+            char *entries, *entry;
 
             bpc_strBuf_snprintf(inodeDir, 0, "%s/pc/%s/%d/%s", BPC_TopDir.s, ac->hostName->s, ac->bkupMergeList[i].num, attribDir->s);
             bpc_strBuf_snprintf(fullAttribPath, 0, "%s/%s", inodeDir->s, attribFile->s);
@@ -400,17 +409,20 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
                 }
                 bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", inodeDir->s, attribFile->s, status);
             }
+            if ( bpc_attrib_dirNeedRewrite(&dir) ) {
+                attr->dirty = 1;
+            }
             entrySize = bpc_attrib_getEntries(&dir, NULL, 0);
             if ( (entries = malloc(entrySize + 1)) && bpc_attrib_getEntries(&dir, entries, entrySize) == entrySize ) {
-                for ( fileName = entries ; fileName < entries + entrySize ; fileName += strlen(fileName) + 1 ) {
-                    bpc_attrib_file *file = bpc_attrib_fileGet(&dir, fileName, 0);
+                for ( entry = entries ; entry < entries + entrySize ; entry += strlen(entry) + 1 ) {
+                    bpc_attrib_file *file = bpc_attrib_fileGet(&dir, entry, 0);
                     if ( !file ) continue;
                     if ( file->type == BPC_FTYPE_DELETED ) {
-                        bpc_attrib_fileDeleteName(&attr->dir, fileName);
+                        bpc_attrib_fileDeleteName(&attr->dir, entry);
                     } else {
                         bpc_attrib_file *fileDest;
 
-                        if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, fileName, 1)) ) {
+                        if ( !(fileDest = bpc_attrib_fileGet(&attr->dir, entry, 1)) ) {
                             bpc_strBuf_free(attribPath);
                             bpc_strBuf_free(attribDir);
                             bpc_strBuf_free(attribFile);
@@ -418,11 +430,11 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
                             bpc_strBuf_free(fullAttribPath);
                             return NULL;
                         }
-                        if ( fileDest->key.key == fileName ) {
+                        if ( fileDest->key.key == entry ) {
                             /*
                              * new entry - initialize
                              */
-                            bpc_attrib_fileInit(fileDest, fileName, 0);
+                            bpc_attrib_fileInit(fileDest, entry, 0);
                         }
                         bpc_attrib_fileCopy(fileDest, file);
                     }
@@ -451,6 +463,12 @@ static bpc_attribCache_dir *bpc_attribCache_loadInode(bpc_attribCache_info *ac, 
         if ( (status = bpc_attrib_dirRead(&attr->dir, inodeDir->s, attribFile->s, ac->backupNum)) ) {
             bpc_logErrf("bpc_attribCache_loadInode: bpc_attrib_dirRead(%s/%s) returned %d\n", inodeDir->s, attribFile->s, status);
         }
+        if ( bpc_attrib_dirNeedRewrite(&attr->dir) ) {
+            attr->dirty = 1;
+        }
+    }
+    if ( attr->dirty ) {
+        if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attribCache_loadInode: will rewrite path = %s -> dir = %s, fileName = %s\n", attribPath, attribDir, attribFile);
     }
     if ( bpc_hashtable_entryCount(&ac->inodeHT) > BPC_ATTRIBCACHE_DIR_COUNT_MAX ) {
         bpc_attribCache_flush(ac, 0, NULL);
