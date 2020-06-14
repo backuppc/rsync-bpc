@@ -1326,30 +1326,31 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
         bpc_strBuf_resize(attribPath, attribPathLen + 1 + 2 * digest.len + 1 + 16);
         attribPath->s[attribPathLen++] = '_';
         bpc_digest_digest2str(&digest, attribPath->s + attribPathLen);
+        /*
+         * Now create an empty attrib file
+         */
+        if ( (fdNum = open(attribPathTemp->s, O_WRONLY | O_CREAT | O_TRUNC, 0660)) < 0 ) {
+            bpc_logErrf("bpc_attrib_dirWrite: can't open/create raw %s for writing\n", attribPathTemp->s);
+            bpc_strBuf_free(attribPath);
+            bpc_strBuf_free(attribPathTemp);
+            return -1;
+        }
+        close(fdNum);
+        if ( rename(attribPathTemp->s, attribPath->s) ) {
+            bpc_logErrf("bpc_attrib_dirWrite: rename from %s to %s failed\n", attribPathTemp->s, attribPath->s);
+            bpc_strBuf_free(attribPath);
+            bpc_strBuf_free(attribPathTemp);
+            return -1;
+        }
+        if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: created new attrib file %s\n", attribPath->s);
     } else {
         bpc_strBuf_resize(attribPathTemp, attribPathLen + 16);
-        digest.len = 0;
+        memset(&digest, 0, sizeof(digest));
         attribPath->s[attribPathLen++] = '_';
         strcpy(attribPath->s + attribPathLen, "0");
+        if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: skipping creating new empty attrib file %s\n", attribPath->s);
+        unlink(attribPath->s);
     }
-    
-    /*
-     * Now create an empty attrib file
-     */
-    if ( (fdNum = open(attribPathTemp->s, O_WRONLY | O_CREAT | O_TRUNC, 0660)) < 0 ) {
-        bpc_logErrf("bpc_attrib_dirWrite: can't open/create raw %s for writing\n", attribPathTemp->s);
-        bpc_strBuf_free(attribPath);
-        bpc_strBuf_free(attribPathTemp);
-        return -1;
-    }
-    close(fdNum);
-    if ( rename(attribPathTemp->s, attribPath->s) ) {
-        bpc_logErrf("bpc_attrib_dirWrite: rename from %s to %s failed\n", attribPathTemp->s, attribPath->s);
-        bpc_strBuf_free(attribPath);
-        bpc_strBuf_free(attribPathTemp);
-        return -1;
-    }
-    if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_attrib_dirWrite: created new attrib file %s\n", attribPath->s);
 
     if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attrib_dirWrite: new attrib digest = 0x%02x%02x%02x..., oldDigest = 0x%02x%02x...\n",
                 digest.digest[0], digest.digest[1], digest.digest[2],
@@ -1362,7 +1363,7 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
 
     if ( oldDigest ) {
         if ( !digestChanged ) {
-            if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: old attrib has same digest; no changes to ref counts\n");
+            if ( BPC_LogLevel >= 4 ) bpc_logMsgf("bpc_attrib_dirWrite: old attrib has same digest; no changes to ref counts\n");
             bpc_strBuf_free(attribPath);
             bpc_strBuf_free(attribPathTemp);
             return 0;
