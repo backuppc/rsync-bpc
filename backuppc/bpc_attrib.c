@@ -1313,7 +1313,7 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
 
     if ( oldDigest ) {
         if ( !digestChanged ) {
-            if ( BPC_LogLevel >= 2 ) bpc_logMsgf("bpc_attrib_dirWrite: old attrib has same digest; no changes to ref counts\n");
+            if ( BPC_LogLevel >= 4 ) bpc_logMsgf("bpc_attrib_dirWrite: old attrib has same digest; no changes to ref counts\n");
             return 0;
         }
         if ( attribPathLen + oldDigest->len * 2 + 2 >= sizeof(attribPath) ) {
