@@ -1,5 +1,36 @@
 NEWS for rsync-bpc-3.0.9.
 
+3.0.9.15 released 20 Jun 2020:
+
+   - add xattr support on directories and symlinks
+
+   - remove old xattr when updating, and also when setting empty ACL
+
+   - fix for restore of migrated v3 backup
+
+   - fix from rsync-3.2.0dev to get correct file ndx for xattr fetching
+     from sender when need_unsorted_flist == 1; fixes incorrect file
+     indexing rsync bug when long xattr values are fetched
+
+   - fixed attrib refCnt when attrib is unchanged
+
+   - bpc_attrib_dirWrite() doesn't create empty attrib files
+
+   - force rewrite of attr file if xattr key fixup was applied
+
+   - mkdir sets mtime to current time if --omit-dir-times
+
+   - bpc_sysCall_checkFileMatch() only prints missing file warning if size > 0
+
+   - fix to bpc_lstat() that returned wrong type for socket
+
+   - ensure bpc_lsetxattr() only returns 0 or -1
+
+   - replaced AC_HEADER_MAJOR with check for sys/mkdev.h and sys/sysmacros.h
+     to avoid compiler warnings
+
+   - fix compiler warnings about possible snprintf() truncation
+
 3.0.9.14 released 8 Jul 2019:
 
    - fix to use correct int format when reading v3 attrib files

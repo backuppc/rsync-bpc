@@ -2455,7 +2455,7 @@ ac_config_headers="$ac_config_headers config.h"
 
 
 
-RSYNC_VERSION=3.0.9.14
+RSYNC_VERSION=3.0.9.15
 
 { $as_echo "$as_me:${as_lineno-$LINENO}: Configuring rsync $RSYNC_VERSION" >&5
 $as_echo "$as_me: Configuring rsync $RSYNC_VERSION" >&6;}
