@@ -37,7 +37,7 @@ extern int BPC_LogLevel;
 typedef struct _bpc_strBuf {
     char *s;
     size_t size;
-    char buffer[32];
+    char buffer[2048];
     struct _bpc_strBuf *next;   /* for free list */
 } bpc_strBuf;
 
