@@ -245,7 +245,7 @@ static void bpc_attrib_xattrListKey(bpc_attrib_xattr *xattr, xattrList_info *inf
             info->list[info->idx + xattr->key.keyLen - 1] = 0x0;
             bpc_logMsgf("bpc_attrib_xattrListKey: BOTCH: truncated xattr name '%s' to match keyLen %u\n", info->list + info->idx, xattr->key.keyLen);
         }
-        if ( BPC_LogLevel >= 4 ) bpc_logMsgf("bpc_attrib_xattrListKey: adding %s\n", info->list + info->idx);
+        if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_attrib_xattrListKey: adding %s\n", info->list + info->idx);
         info->idx += xattr->key.keyLen;
     } else {
         info->idx += xattr->key.keyLen;
@@ -936,6 +936,7 @@ int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath,
             file->backupNum = backupNum;
 
             bufP = bpc_attrib_buf2file(file, bufP, buf + nRead, xattrNumEntries, &xattrFixup);
+            dir->needRewrite |= xattrFixup;
             if ( bufP > buf + nRead ) {
                 /*
                  * Need to get more data and try again.  We have allocated file->name,
@@ -1337,7 +1338,7 @@ int bpc_attrib_dirWrite(bpc_deltaCount_info *deltaInfo, bpc_attrib_dir *dir, cha
         attribPath->s[attribPathLen++] = '_';
         bpc_digest_digest2str(&digest, attribPath->s + attribPathLen);
         /*
-         * Now create an empty attrib file
+         * Now create an empty attrib file with the file name digest
          */
         if ( (fdNum = open(attribPathTemp->s, O_WRONLY | O_CREAT | O_TRUNC, 0660)) < 0 ) {
             bpc_logErrf("bpc_attrib_dirWrite: can't open/create raw %s for writing\n", attribPathTemp->s);
