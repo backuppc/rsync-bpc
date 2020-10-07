@@ -1589,6 +1589,7 @@ int bpc_rename_request(char *oldName, char *newName, uint32 isTemp, char *bufP, 
         bpc_logErrf("bpc_rename_request(%s,%s) got to %p vs end = %p\n", oldName, newName, bufP, bufEnd);
     }
     file->isTemp = isTemp;
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_rename_request: name = %s, xattr cnt = %d\n", file->name, bpc_hashtable_entryCount(&file->xattrHT));
     return bpc_rename(oldName, newName);
 }
 
