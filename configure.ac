@@ -1,6 +1,6 @@
 dnl Process this file with autoconf to produce a configure script.
 
-AC_INIT([rsync-bpc],[3.1.3beta1],[https://github.com/backuppc/rsync-bpc/issues])
+AC_INIT([rsync-bpc],[3.1.3.0],[https://github.com/backuppc/rsync-bpc/issues])
 
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR([byteorder.h])
