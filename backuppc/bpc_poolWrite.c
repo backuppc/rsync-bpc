@@ -788,6 +788,7 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
             unlink(lockFile->s);
             redo = 1;
         } else {
+            chmod(poolPath, 0444);
             stat(poolPath->s, &st);
             info->retValue     = v3PoolFile ? 2 : 0;
             info->poolFileSize = st.st_size;
@@ -836,6 +837,7 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
              * remove the original file and return
              */
             unlink(fileName);
+            chmod(poolPath, 0444);
             info->retValue     = v3PoolFile ? 2 : 0;
             info->poolFileSize = st.st_size;
             bpc_strBuf_free(poolPath);
