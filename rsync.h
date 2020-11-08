@@ -712,7 +712,7 @@ struct ht_int64_node {
 #define ACLS_NEED_MASK 1
 #endif
 
-#if 0
+#if defined HAVE_FALLOCATE || HAVE_SYS_FALLOCATE
 #ifdef HAVE_LINUX_FALLOC_H
 #include <linux/falloc.h>
 #endif
