@@ -1879,7 +1879,7 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 	}
         if ( !bpc_top_dir || !bpc_host_name || !bpc_share_name || bpc_backup_num < 0 ) {
             snprintf(err_buf, sizeof(err_buf), "BackupPC options are compulsory for running rsync_bpc\n");
-            exit_cleanup(RERR_SYNTAX);
+            return 0;
         }
 
 	if (checksum_choice && strcmp(checksum_choice, "auto") != 0 && strcmp(checksum_choice, "auto,auto") != 0) {
