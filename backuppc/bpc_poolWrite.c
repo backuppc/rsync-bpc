@@ -693,10 +693,11 @@ int bpc_poolWrite_copyToPool(bpc_poolWrite_info *info, char *poolPath, char *fil
     if ( (fdRead = open(fileName, O_RDONLY)) < 0 ) {
         info->errorCnt++;
         bpc_logErrf("bpc_poolWrite_copyToPool: can't open %s for reading", fileName);
+        close(fdWrite);
         return -1;
     }
 
-    while ( (nRead = read(fdRead, info->buffer, sizeof(info->buffer))) > 0 ) {
+    while ( (nRead = read(fdRead, info->buffer, BPC_POOL_WRITE_BUF_SZ)) > 0 ) {
         uchar *p = info->buffer;
         int thisWrite;
 
