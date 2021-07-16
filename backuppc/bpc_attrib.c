@@ -175,10 +175,15 @@ void bpc_attrib_xattrCopy(bpc_attrib_xattr *xattrSrc, bpc_attrib_file *fileDest)
 {
     bpc_attrib_xattr *xattr;
     uchar *key   = (uchar*)malloc(xattrSrc->key.keyLen > 0 ? xattrSrc->key.keyLen : 1);
-    uchar *value = (uchar*)malloc(xattrSrc->valueLen > 0 ? xattrSrc->valueLen : 1);
+    uchar *value;
 
-    if ( !key || !value ) {
-        bpc_logErrf("bpc_attrib_xattrCopy: can't allocate %d,%d bytes\n", xattrSrc->key.keyLen + 1, xattrSrc->valueLen + 1);
+    if ( !key ) {
+        bpc_logErrf("bpc_attrib_xattrCopy: can't allocate %d bytes for key\n", xattrSrc->key.keyLen + 1);
+        return;
+    }
+    value = (uchar*)malloc(xattrSrc->valueLen > 0 ? xattrSrc->valueLen : 1);
+    if ( !value ) {
+        bpc_logErrf("bpc_attrib_xattrCopy: can't allocate %d bytes for value\n", xattrSrc->valueLen + 1);
         return;
     }
 
@@ -691,8 +696,8 @@ uchar *bpc_attrib_buf2fileFull(bpc_attrib_file *file, uchar *bufP, uchar *bufEnd
 int bpc_attrib_dirRead(bpc_attrib_dir *dir, char *dirPath, char *attribFilePath, int backupNum)
 {
     bpc_strBuf *attribPath = bpc_strBuf_new();
-    bpc_fileZIO_fd fd;
-    size_t nRead;
+    bpc_fileZIO_fd fd = { .fd = -1 };
+    size_t nRead = 0;
     uint32 magic = 0;
     uchar buf[8 * 65536], *bufP;
     STRUCT_STAT st;
