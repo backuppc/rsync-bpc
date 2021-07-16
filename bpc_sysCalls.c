@@ -1974,8 +1974,8 @@ DIR *bpc_opendir(const char *path)
      */
     d->entrySize = entrySize;
     if ( bpc_attribCache_getDirEntries(&acNew, (char*)path, d->entries, d->entrySize) != d->entrySize ) {
-        free(d);
         free(d->entries);
+        free(d);
         return NULL;
     }
     d->entryIdx = 0;
