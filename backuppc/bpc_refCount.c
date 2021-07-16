@@ -302,6 +302,7 @@ int bpc_poolRefFileRead(bpc_refCount_info *info, char *fileName)
     }
     if ( bpc_poolRef_read_more_data(fd, buf, sizeof(buf), &nRead, &bufP, fileName) < 0 ) {
         bpc_logErrf("bpc_poolRefFileRead: can't read data from %s (errno %d)\n", fileName, errno);
+        close(fd);
         return -1;
     }
     magic = CONV_BUF_TO_UINT32(bufP);
@@ -309,6 +310,7 @@ int bpc_poolRefFileRead(bpc_refCount_info *info, char *fileName)
 
     if ( magic != BPC_POOL_REF_MAGIC ) {
         bpc_logErrf("bpc_poolRefFileRead: bad magic number 0x%x (expected 0x%x)\n", magic, BPC_POOL_REF_MAGIC);
+        close(fd);
         return -1;
     }
 
