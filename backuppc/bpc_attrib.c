@@ -183,6 +183,7 @@ void bpc_attrib_xattrCopy(bpc_attrib_xattr *xattrSrc, bpc_attrib_file *fileDest)
     }
     value = (uchar*)malloc(xattrSrc->valueLen > 0 ? xattrSrc->valueLen : 1);
     if ( !value ) {
+        free(key);
         bpc_logErrf("bpc_attrib_xattrCopy: can't allocate %d bytes for value\n", xattrSrc->valueLen + 1);
         return;
     }
