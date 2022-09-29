@@ -372,6 +372,7 @@ void bpc_poolRefRequestFsck(char *backupDir, int ext)
         bpc_logErrf("bpc_poolRefRequestFsck: can't open/create fsck request file %s (errno %d)\n", fileName->s, errno);
     }
     bpc_strBuf_free(fileName);
+    close(fd);
 }
 
 /***********************************************************************
