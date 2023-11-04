@@ -162,7 +162,7 @@ static int bpc_poolRef_read_more_data(int fd, uchar *buf, size_t bufSize, size_t
         }
         if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_poolRef_read_more_data: read %d bytes (nRead = %d, sizeof(buf) = %d)\n", thisRead, *nRead, bufSize);
         *nRead += thisRead;
-    } while ( thisRead > 0 && *nRead < sizeof(buf) );
+    } while ( thisRead > 0 && *nRead < bufSize );
     return 0;
 }
 
