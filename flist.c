@@ -512,7 +512,7 @@ static void send_file_entry(int f, const char *fname, struct file_struct *file,
 #endif
 
 	for (l1 = 0;
-	    lastname[l1] && (fname[l1] == lastname[l1]) && (l1 < 255);
+	    (l1 < 255) && lastname[l1] && (fname[l1] == lastname[l1]);
 	    l1++) {}
 	l2 = strlen(fname+l1);
 
