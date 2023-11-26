@@ -20,6 +20,7 @@
  */
 
 #include "rsync.h"
+#include "version.h"
 #include "itypes.h"
 
 extern int quiet;
