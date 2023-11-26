@@ -685,6 +685,8 @@ int bpc_poolWrite_copyToPool(bpc_poolWrite_info *info, char *poolPath, char *fil
     int fdRead, fdWrite;
     int nRead, nWrite;
 
+    if ( BPC_LogLevel >= 6 ) bpc_logMsgf("bpc_poolWrite_copyToPool: copy %s -> %s \n", fileName, poolPath);
+
     if ( (fdWrite = open(poolPath, O_WRONLY | O_CREAT | O_EXCL, 0666)) < 0 ) {
         info->errorCnt++;
         bpc_logErrf("bpc_poolWrite_copyToPool: can't open/create %s for writing", poolPath);
@@ -775,29 +777,51 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
         bpc_strBuf_snprintf(lockFile, 0, "%s.lock", poolPath->s);
         lockFd = bpc_lockRangeFile(lockFile->s, 0, 1, 1);
         /*
-         * If we don't have the lock, or the file is no longer zero length, or the rename fails,
+         * If we don't have the lock, or the file is no longer zero length
          * then try again.
          */
-        if ( lockFd < 0 || stat(poolPath->s, &st) || st.st_size != 0 || rename(fileName, poolPath->s) ) {
+        if ( lockFd < 0 || stat(poolPath->s, &st) || st.st_size != 0 ) {
             if ( BPC_LogLevel >= 5 ) {
-                bpc_logMsgf("bpc_poolWrite_addToPool: lock/rename failed: need to repeat write (lockFd = %d, size = %lu, errno = %d)\n",
-                             lockFd, (unsigned long)st.st_size, errno);
+                bpc_logMsgf("bpc_poolWrite_addToPool: can't acquire lock for rename %s -> %s : need to repeat write (lockFd = %d, size = %lu)\n",
+                              fileName, poolPath->s, lockFd, (unsigned long)st.st_size);
             }
             if ( lockFd >= 0 ) {
                 bpc_unlockRangeFile(lockFd);
             }
             unlink(lockFile->s);
             redo = 1;
-        } else {
-            chmod(poolPath->s, 0444);
-            stat(poolPath->s, &st);
-            info->retValue     = v3PoolFile ? 2 : 0;
-            info->poolFileSize = st.st_size;
-            bpc_unlockRangeFile(lockFd);
-            unlink(lockFile->s);
-            bpc_strBuf_free(poolPath);
-            bpc_strBuf_free(lockFile);
-            return;
+        } else { 
+        /*
+         * If rename and regular file copy failed
+         * then try again.
+         */
+            if( unlink(poolPath->s) ) {
+            	bpc_logErrf("bpc_poolWrite_addToPool: remove %s failed; errno = %d\n", poolPath->s, errno);
+            	bpc_unlockRangeFile(lockFd);
+            	unlink(lockFile->s);
+		redo = 1;
+            } else if( rename(fileName, poolPath->s) ) {
+            	bpc_logErrf("bpc_poolWrite_addToPool: rename %s -> %s failed; errno = %d\n", fileName, poolPath->s, errno);
+            	bpc_unlockRangeFile(lockFd);
+            	unlink(lockFile->s);
+		redo = 1;
+             	if ( !bpc_poolWrite_copyToPool(info, poolPath->s, fileName) ){
+		    unlink(fileName);
+		    redo = 0;
+		}
+	    }
+
+	    if(!redo) {
+            	chmod(poolPath->s, 0444);
+            	stat(poolPath->s, &st);
+            	info->retValue     = v3PoolFile ? 2 : 0;
+            	info->poolFileSize = st.st_size;
+            	bpc_unlockRangeFile(lockFd);
+            	unlink(lockFile->s);
+            	bpc_strBuf_free(poolPath);
+            	bpc_strBuf_free(lockFile);
+            	return;
+	    }
         }
         bpc_strBuf_free(lockFile);
     }
@@ -856,7 +880,7 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
              * file systems, or the fileName didn't get written.
              * Just copy the file instead (assuming fileName got written).
              */
-            bpc_poolWrite_copyToPool(info, poolPath->s, fileName);
+            if ( !bpc_poolWrite_copyToPool(info, poolPath->s, fileName) ) unlink(fileName);
             bpc_strBuf_free(poolPath);
             return;
         }
