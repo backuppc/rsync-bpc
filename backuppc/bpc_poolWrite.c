@@ -795,12 +795,12 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
          * If rename and regular file copy failed
          * then try again.
          */
-            if( unlink(poolPath->s) ) {
+            if ( unlink(poolPath->s) ) {
             	bpc_logErrf("bpc_poolWrite_addToPool: remove %s failed; errno = %d\n", poolPath->s, errno);
             	bpc_unlockRangeFile(lockFd);
             	unlink(lockFile->s);
 		redo = 1;
-            } else if( rename(fileName, poolPath->s) ) {
+            } else if ( rename(fileName, poolPath->s) ) {
             	bpc_logErrf("bpc_poolWrite_addToPool: rename %s -> %s failed; errno = %d\n", fileName, poolPath->s, errno);
             	bpc_unlockRangeFile(lockFd);
             	unlink(lockFile->s);
@@ -811,7 +811,7 @@ void bpc_poolWrite_addToPool(bpc_poolWrite_info *info, char *fileName, int v3Poo
 		}
 	    }
 
-	    if(!redo) {
+	    if ( !redo ) {
             	chmod(poolPath->s, 0444);
             	stat(poolPath->s, &st);
             	info->retValue     = v3PoolFile ? 2 : 0;
