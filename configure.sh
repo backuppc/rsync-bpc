@@ -7706,7 +7706,8 @@ else $as_nop
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-main()
+int
+main(void)
 {
    if (socket(AF_INET6, SOCK_STREAM, 0) < 0)
      exit(1);
