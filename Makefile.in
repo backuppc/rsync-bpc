@@ -83,6 +83,7 @@ $(BPCOBJ): backuppc/backuppc.h
 $(OBJS): $(HEADERS)
 $(CHECK_OBJS): $(HEADERS)
 
+tls.o xattrs.o: lib/sysxattrs.h
 flist.o: rounding.h
 
 rounding.h: rounding.c rsync.h proto.h
