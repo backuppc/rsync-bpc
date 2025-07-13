@@ -121,7 +121,7 @@ static void match_gnums(int32 *ndx_list, int ndx_count)
 	int32 gnum, gnum_next;
 
 	qsort(ndx_list, ndx_count, sizeof ndx_list[0],
-	     (int (*)()) hlink_compare_gnum);
+	     (int (*)(const void*, const void*)) hlink_compare_gnum);
 
         if ( inc_recurse && prior_hlinks && hlink_nlinks ) {
             for (from = 0; from < ndx_count; from++) {
