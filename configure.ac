@@ -1148,6 +1148,7 @@ AC_CACHE_CHECK([if gettimeofday takes tz argument],rsync_cv_HAVE_GETTIMEOFDAY_TZ
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <sys/time.h>
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
+#include <stdlib.h>
 #endif]], [[struct timeval tv; return gettimeofday(&tv, NULL);]])],[rsync_cv_HAVE_GETTIMEOFDAY_TZ=yes],[rsync_cv_HAVE_GETTIMEOFDAY_TZ=no])])
 if test x"$rsync_cv_HAVE_GETTIMEOFDAY_TZ" != x"no"; then
     AC_DEFINE(HAVE_GETTIMEOFDAY_TZ, 1, [Define to 1 if gettimeofday() takes a time-zone arg])
