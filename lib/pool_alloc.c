@@ -9,7 +9,7 @@ struct alloc_pool
 	size_t			size;		/* extent size		*/
 	size_t			quantum;	/* allocation quantum	*/
 	struct pool_extent	*extents;	/* top extent is "live" */
-	void			(*bomb)();	/* function to call if
+	void			(*bomb)(const char *);	/* function to call if
 						 * malloc fails		*/
 	int			flags;
 
