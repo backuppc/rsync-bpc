@@ -1,7 +1,7 @@
 /*
  * Routines for caching multiple directories.
  *
- * Copyright (C) 2013 Craig Barratt.
+ * Copyright (C) 2013-2025 Craig Barratt.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -202,7 +202,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, b
     splitPath(ac, dirStr, fileName, attribPath, path);
     attribPathLen = strlen(attribPath->s);
 
-    if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadPath: path = %s -> dir = %s, fileName = %s, attribPath = %s\n", path, dirStr->s, fileName, attribPath->s);
+    if ( BPC_LogLevel >= 9 ) bpc_logMsgf("bpc_attribCache_loadPath: path = %s -> dir = %s, fileName = %s, attribPath = %s\n", path, dirStr->s, fileName->s, attribPath->s);
     bpc_strBuf_free(dirStr);
 
     attr = bpc_hashtable_find(&ac->attrHT, (uchar*)attribPath->s, attribPathLen, 1);
@@ -335,7 +335,7 @@ static bpc_attribCache_dir *bpc_attribCache_loadPath(bpc_attribCache_info *ac, b
 	bpc_hashtable_iterate(&attr->dir.filesHT, (void*)bpc_attribCache_removeDeletedEntries, attr);
     }
     if ( attr->dirty ) {
-        if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attribCache_loadPath: will rewrite path = %s -> dir = %s, fileName = %s, attribPath = %s\n", path, dirStr->s, fileName, attribPath->s);
+        if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_attribCache_loadPath: will rewrite path = %s -> dir = %s, fileName = %s, attribPath = %s\n", path, dirStr->s, fileName->s, attribPath->s);
     }
     if ( bpc_hashtable_entryCount(&ac->attrHT) > BPC_ATTRIBCACHE_DIR_COUNT_MAX ) {
         bpc_attribCache_flush(ac, 0, NULL);
