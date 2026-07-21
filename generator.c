@@ -720,7 +720,7 @@ static void sum_sizes_sqroot(struct sum_struct *sum, int64 len)
 /*
  * Generate and send a stream of signatures/checksums that describe a buffer
  *
- * Generate approximately one checksum every block_len bytes.
+ * Generate one checksum roughly every block_len bytes.
  */
 static int generate_and_send_sums(int fd, OFF_T len, int f_out, int f_copy)
 {
@@ -744,6 +744,12 @@ static int generate_and_send_sums(int fd, OFF_T len, int f_out, int f_copy)
 
 	for (i = 0; i < sum.count; i++) {
 		int32 n1 = (int32)MIN(len, (OFF_T)sum.blength);
+		/*
+		 * Set 'map' to point to the chunk of data which we're working on at the moment.
+		 * The chunk of data is in a memory-mapped buffer identified by mapbuf.  Inter alia mapbuf contains
+		 * a pointer to a 256K (yes, K) area of RAM that was allocated by the call to map_file() above.
+		 * map_file() in fileio.c calls new0() to calloc() the RAM for mapbuf, it's freed by unmap_file().
+		*/
 		char *map = map_ptr(mapbuf, offset, n1);
 		char sum2[SUM_LENGTH];
 		uint32 sum1;

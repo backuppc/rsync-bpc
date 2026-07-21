@@ -157,7 +157,7 @@ static int bpc_poolRef_read_more_data(int fd, uchar *buf, size_t bufSize, size_t
             thisRead = read(fd, buf + *nRead, bufSize - *nRead);
         } while ( thisRead < 0 && errno == EINTR );
         if ( thisRead < 0 ) {
-            bpc_logErrf("bpc_poolRefFileRead: can't read more bytes from %s (errno %d)\n", fileName, errno);
+            bpc_logErrf("bpc_poolRef_read_more_data: can't read more bytes from %s (errno %d)\n", fileName, errno);
             return -1;
         }
         if ( BPC_LogLevel >= 8 ) bpc_logMsgf("bpc_poolRef_read_more_data: read %d bytes (nRead = %d, sizeof(buf) = %d)\n", thisRead, *nRead, bufSize);

@@ -740,7 +740,7 @@ int bpc_mkstemp(char *template, char *origFileName)
 
 /*
  * Confirm that fileName exists, has the indicated size and MD5 file_sum.  If so, mimic
- * mkstemp above by creating a temporary file copy, but don't open it.
+ * bpc_mkstemp above by creating a temporary file copy, but don't open it.
  *
  * The is used to implement an optimization in receiver.c: if we are receiving file deltas,
  * we check if the deltas show the file is identical.  That avoids opening the file
