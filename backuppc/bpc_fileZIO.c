@@ -234,9 +234,9 @@ ssize_t bpc_fileZIO_read(bpc_fileZIO_fd *fd, uchar *buf, size_t nRead)
                      */
                     fd->eof = 1;
 		    if( lseek(fd->fd, -fd->strm.avail_in, SEEK_CUR) < 0 ) {
-		      bpc_logErrf("bpc_fileZIO_read: lseek failed, fd->fd=%d\n", fd->fd );
+			bpc_logErrf("bpc_fileZIO_read: lseek failed, fd->fd = %d, errno = %d\n", fd->fd, errno );
 			fd->error = errno;
-			return fd->error;
+			return -1;
 		    }
                     fd->strm.avail_in = 0;
                 }
