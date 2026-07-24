@@ -1,7 +1,7 @@
 /*
  * Routines for reading and writing compressed files using zlib
  *
- * Copyright (C) 2013 Craig Barratt.
+ * Copyright (C) 2013 - 2026 Craig Barratt and G.W. Haywood.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -158,13 +158,15 @@ void bpc_fileZIO_writeTeeStderr(bpc_fileZIO_fd *fd, int tee)
 }
 
 /*
- * Read from a compressed or regular file.
+ * Read from a compressed or regular file into *buf.
+ * Returns a negative value on error, may also set fd->error.
+ * Returns the number of bytes read on success.
  */
 ssize_t bpc_fileZIO_read(bpc_fileZIO_fd *fd, uchar *buf, size_t nRead)
 {
     size_t totalRead = 0;
 
-    if ( fd->write || fd->fd < 0 ) return -1;
+    if ( fd->write || fd->fd < 0 || nRead < 0 ) return -1;
     if ( fd->compressLevel == 0 ) {
         ssize_t thisRead;
         while ( nRead > 0 ) {
@@ -231,8 +233,11 @@ ssize_t bpc_fileZIO_read(bpc_fileZIO_fd *fd, uchar *buf, size_t nRead)
                      * it is positioned at the 0xb3.
                      */
                     fd->eof = 1;
-                    /* TODO: check return status */
-                    lseek(fd->fd, -fd->strm.avail_in, SEEK_CUR);
+		    if( lseek(fd->fd, -fd->strm.avail_in, SEEK_CUR) < 0 ) {
+		      bpc_logErrf("bpc_fileZIO_read: lseek failed, fd->fd=%d\n", fd->fd );
+			fd->error = errno;
+			return -1;
+		    }
                     fd->strm.avail_in = 0;
                 }
             }
@@ -392,8 +397,11 @@ int bpc_fileZIO_rewind(bpc_fileZIO_fd *fd)
 }
 
 /*
- * Returns \n terminated lines, one at a time, from the opened read stream.
- * The returned string is not '\0' terminated.  At EOF sets *str = NULL;
+ * Reads \n terminated lines, one at a time, from the opened read stream.
+ * On error returns a negative value (probably -1 but see bpc_fileZIO_read).
+ * Returns 0 on a successful read.  The string length is written to *strLen.
+ * The string is written to **str.  The string is NOT terminated with '\0'.
+ * At EOF sets *str to NULL and strLen to 0.
  */
 int bpc_fileZIO_readLine(bpc_fileZIO_fd *fd, char **str, size_t *strLen)
 {

@@ -1,7 +1,7 @@
 /*
  * Routines for matching and writing files in the pool.
  *
- * Copyright (C) 2013 Craig Barratt.
+ * Copyright (C) 2013 - 2026 Craig Barratt and G.W. Haywood.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,7 +18,6 @@
  */
 
 #include "backuppc.h"
-
 
 static uint32 PoolWriteCnt = 0;
 
@@ -85,7 +84,7 @@ int bpc_poolWrite_open(bpc_poolWrite_info *info, int compress, bpc_digest *diges
 
 /*
  * Fill out the array of candidate matching files.  Returns the number of active
- * matching files.
+ * matching files, or -1 on error.
  */
 static int bpc_poolWrite_updateMatches(bpc_poolWrite_info *info)
 {
@@ -97,7 +96,7 @@ static int bpc_poolWrite_updateMatches(bpc_poolWrite_info *info)
             continue;
         }
         while ( info->candidateList ) {
-            int match = 1;
+            int files_match = 1;
             bpc_candidate_file *candidateFile;
 
             candidateFile = info->candidateList;
@@ -129,12 +128,21 @@ static int bpc_poolWrite_updateMatches(bpc_poolWrite_info *info)
 
                         if ( thisRead > COMPARE_BUF_SZ ) thisRead = COMPARE_BUF_SZ;
                         nread0 = bpc_fileZIO_read(&info->fd, buf0, thisRead);
-                        nread1 = bpc_fileZIO_read(&info->match[i].fd, buf1, thisRead);
-                        if ( nread0 != nread1 || memcmp(buf0, buf1, nread0) ) {
+			/* Only read more of the candidate file if the candidate has not already failed to match - if you can follow that. */
+                        if ( files_match )
+			  nread1 = bpc_fileZIO_read(&info->match[i].fd, buf1, thisRead);
+			if ( nread0 == 0 && nread1 == 0 ) break;	/* No more data in either file, files presumably match */
+			if ( nread0 == 0 && nread1 > 0 ) {		/* No more data in original, more data in candidate, files do not match */
+			    files_match = 0;
+			    break;
+			}
+			if ( nread0 < 0 || nread1 < 0 ) return -1;	/* error conditions, most probably a damaged file */
+			/* Don't bother comparing the buffers if the candidate has already failed to match */
+                        if ( files_match && ((nread0 != nread1) || memcmp(buf0, buf1, nread0)) ) {
                             /*
                              * Need to keep reading the original file to get back to matchPosn
                              */
-                            match = 0;
+                            files_match = 0;
                         }
                         idx += nread0;
                     }
@@ -153,14 +161,14 @@ static int bpc_poolWrite_updateMatches(bpc_poolWrite_info *info)
                         if ( thisRead > info->bufferIdx - idx ) thisRead = info->bufferIdx - idx;
                         nread1 = bpc_fileZIO_read(&info->match[i].fd, buf1, thisRead);
                         if ( thisRead != nread1 || memcmp(info->buffer + idx, buf1, thisRead) ) {
-                            match = 0;
+                            files_match = 0;
                             break;
                         }
                         idx += thisRead;
                     }
                 }
             }
-            if ( !match ) {
+            if ( !files_match ) {
                 if ( BPC_LogLevel >= 8 ) bpc_logMsgf("Discarding %s since it doesn't match starting portion\n", candidateFile->fileName);
                 bpc_fileZIO_close(&info->match[i].fd);
                 free(candidateFile);
@@ -182,7 +190,7 @@ static int bpc_poolWrite_updateMatches(bpc_poolWrite_info *info)
 
 /*
  * Write a chunk to the current pool file.
- *
+ * On error returns -1.
  * Call with undef to indicate EOF / close.
  */
 int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
@@ -436,7 +444,11 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
         /*
          * Open the first set of candidate files.
          */
-        bpc_poolWrite_updateMatches(info); 
+	if ( bpc_poolWrite_updateMatches(info) < 0 ) {
+	    info->errorCnt++;
+	    bpc_logErrf("bpc_poolWrite_write: error reading file(s) for compare\n");
+	    return -1;
+	}
         info->state = 3;
     }
     if ( info->state == 3 ) {
@@ -480,6 +492,11 @@ int bpc_poolWrite_write(bpc_poolWrite_info *info, uchar *data, size_t dataLen)
             if ( replaceCnt ) {
                 nMatch = bpc_poolWrite_updateMatches(info); 
             }
+	    if ( nMatch < 0 ) {
+		info->errorCnt++;
+		bpc_logErrf("bpc_poolWrite_write: error reading file(s) for compare\n");
+		return -1;
+	    }
             if ( nread0 == 0 || nMatch == 0 ) {
                 /* 
                  * we are at eof (with a match) or there are no matches
@@ -628,7 +645,7 @@ void bpc_poolWrite_cleanup(bpc_poolWrite_info *info)
  *        file was moved to become the new pool file.
  *
  *    - digest: the 16+ byte binary MD5 digest, possibly appended with
- *      on or more additional bytes to point to the right pool file in
+ *      one or more additional bytes to point to the right pool file in
  *      case there are MD5 collisions
  *
  *    - poolFileSize: the compressed pool file size

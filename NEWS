@@ -1,5 +1,11 @@
 NEWS for rsync-bpc 3.1.2.
 
+3.1.2.3 released 24 Jul 2026:
+
+  SECURITY FIXES:
+
+   - Fix possible infinite loop/crash, see Github issue #50.
+
 3.1.2.2 released 20 Jun 2020:
 
    - add xattr support on directories and symlinks
