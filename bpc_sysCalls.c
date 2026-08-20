@@ -20,6 +20,8 @@
 #include "backuppc/backuppc.h"
 #include "ifuncs.h"
 #include "lib/sysxattrs.h"
+#include <limits.h>	/* for NAME_MAX */
+#include <stddef.h>	/* for offsetof() */
 
 #define MAX_FD          (64)
 #define MAX_BUF_SZ      (8 << 20)               /* 8MB */
@@ -636,8 +638,24 @@ static off_t bpc_fileReadAll(bpc_attribCache_info *ac, char *fileName, char *buf
 /*
  * Directory handling
  */
+#ifndef NAME_MAX
+#define NAME_MAX 255
+#endif
+
+/*
+ * Some platforms (eg, illumos/SysV-derived dirent) declare struct dirent's
+ * d_name as a 1-byte placeholder, expecting a real getdents() syscall to
+ * overrun it into a heap buffer sized for the actual directory record. We
+ * synthesize our own dirents here from BackupPC's attribute cache -- there's
+ * no real syscall backing them -- so we can't rely on sizeof(dirent.d_name)
+ * to tell us how much space is actually available; on those platforms it's
+ * always 1, truncating every name to empty. Give the dirent a dedicated
+ * backing buffer sized for a real name instead.
+ */
+#define BPC_DIRENT_BUF_SIZE (sizeof(struct dirent) + NAME_MAX + 1)
+
 typedef struct {
-    struct dirent dirent;
+    struct dirent *dirent;	/* malloc'd separately, sized BPC_DIRENT_BUF_SIZE -- see bpc_opendir()/bpc_closedir() */
     char *entries;
     ssize_t entrySize;
     ssize_t entryIdx;
@@ -1964,7 +1982,12 @@ DIR *bpc_opendir(const char *path)
     if ( (entrySize = bpc_attribCache_getDirEntries(&acNew, (char*)path, NULL, 0)) < 0 ) return NULL;
 
     if ( !(d = calloc(1, sizeof(my_DIR))) ) return NULL;
+    if ( !(d->dirent = malloc(BPC_DIRENT_BUF_SIZE)) ) {
+        free(d);
+        return NULL;
+    }
     if ( !(d->entries = malloc(entrySize)) ) {
+        free(d->dirent);
         free(d);
         return NULL;
     }
@@ -1975,6 +1998,7 @@ DIR *bpc_opendir(const char *path)
     d->entrySize = entrySize;
     if ( bpc_attribCache_getDirEntries(&acNew, (char*)path, d->entries, d->entrySize) != d->entrySize ) {
         free(d->entries);
+        free(d->dirent);
         free(d);
         return NULL;
     }
@@ -1985,19 +2009,29 @@ DIR *bpc_opendir(const char *path)
 struct dirent *bpc_readdir(DIR *dir)
 {
     my_DIR *d = (my_DIR*)dir;
+    /*
+     * Address d_name via raw pointer arithmetic into the malloc'd buffer,
+     * not via struct-member syntax (eg "d->dirent->d_name[i]") -- some
+     * compilers' -Warray-bounds checking tracks the *declared* size of
+     * d_name through member-access syntax regardless of how much memory
+     * is actually behind the pointer, which is a known false positive for
+     * this "allocate more than the struct nominally declares" idiom.
+     */
+    char *namePtr = (char*)d->dirent + offsetof(struct dirent, d_name);
+    size_t maxNameLen = BPC_DIRENT_BUF_SIZE - offsetof(struct dirent, d_name);
 
     if ( d->entryIdx >= d->entrySize ) {
         if ( LogLevel >= 4 ) bpc_logMsgf("bpc_readdir -> NULL\n");
         return NULL;
     }
 
-    strncpy(d->dirent.d_name, d->entries + d->entryIdx, sizeof(d->dirent.d_name));
-    d->dirent.d_name[sizeof(d->dirent.d_name)-1] = '\0';
+    strncpy(namePtr, d->entries + d->entryIdx, maxNameLen);
+    namePtr[maxNameLen-1] = '\0';
     d->entryIdx += strlen(d->entries + d->entryIdx) + 1;
-    memcpy(&d->dirent.d_ino, d->entries + d->entryIdx, sizeof(ino_t));
+    memcpy(&d->dirent->d_ino, d->entries + d->entryIdx, sizeof(ino_t));
     d->entryIdx += sizeof(ino_t);
-    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_readdir -> %s\n", d->dirent.d_name);
-    return &d->dirent;
+    if ( LogLevel >= 4 ) bpc_logMsgf("bpc_readdir -> %s\n", namePtr);
+    return d->dirent;
 }
 
 int bpc_closedir(DIR *dir)
@@ -2007,6 +2041,7 @@ int bpc_closedir(DIR *dir)
     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_closedir()\n");
 
     if ( d->entries) free(d->entries);
+    free(d->dirent);
     free(d);
     return 0;
 }
