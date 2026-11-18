@@ -674,26 +674,43 @@ void bpc_poolWrite_close(bpc_poolWrite_info *info, int *match, bpc_digest *diges
     *errorCnt     = info->errorCnt;
 }
 
-void bpc_poolWrite_repeatPoolWrite(bpc_poolWrite_info *info, char *fileNameTmp)
+void bpc_poolWrite_repeatPoolWrite(bpc_poolWrite_info *info, char *fileNameArg)
 {
+    /*
+     * fileNameArg points into a bpc_strBuf (info->tmpFileName or a match
+     * fileName) that bpc_poolWrite_cleanup() returns to the free list, and
+     * cleanup frees info->tmpFileName, which bpc_poolWrite_close() would free
+     * a second time.  Copy the name first and give info a new tmpFileName.
+     */
+    char *fileNameTmp = strdup(fileNameArg);
+
+    if ( !fileNameTmp ) {
+        bpc_logErrf("bpc_poolWrite_repeatPoolWrite: can't allocate file name\n");
+        info->errorCnt++;
+        return;
+    }
     bpc_poolWrite_cleanup(info);
+    info->tmpFileName = bpc_strBuf_new();
 
     if ( BPC_LogLevel >= 5 ) bpc_logMsgf("bpc_poolWrite_repeatPoolWrite: rewriting %s\n", fileNameTmp);
     if ( info->retryCnt++ > 8 ) {
         bpc_logErrf("bpc_poolWrite_repeatPoolWrite: giving up on %s after %d attempts\n", fileNameTmp, info->retryCnt);
         info->errorCnt++;
         unlink(fileNameTmp);
+        free(fileNameTmp);
         return;
     }
     bpc_strBuf_strcpy(info->tmpFileName, 0, fileNameTmp);
     if ( bpc_fileZIO_open(&info->fd, fileNameTmp, 0, info->compress) < 0 ) {
         bpc_logErrf("bpc_poolWrite_repeatPoolWrite: can't open %s for reading", fileNameTmp);
         info->errorCnt++;
+        free(fileNameTmp);
         return;
     }
     info->eof    = 1;
     info->state  = 2;
     info->fdOpen = 1;
+    free(fileNameTmp);
     bpc_poolWrite_write(info, NULL, 0);
 }
 
